@@ -5,16 +5,16 @@
 
 	;output	"sunride_aquijacks.bin"
 
-	INCLUDE ../../../../sdk/asm/macros/undoc.inc
+	INCLUDE asm/macros/undoc.inc
 
-	INCLUDE ../../../../sdk/asm/constants/driver_result_codes.inc
+	INCLUDE asm/constants/driver_result_codes.inc
 
 	module DRIVER_QUERY
-	INCLUDE ../../../../sdk/asm/constants/driver_driver_queries.inc
+	INCLUDE asm/constants/driver_driver_queries.inc
 	endmod
 
 	module DEVICE_QUERY
-	INCLUDE ../../../../sdk/asm/constants/driver_device_queries.inc
+	INCLUDE asm/constants/driver_device_queries.inc
 	endmod
 
 	org		4000h
@@ -186,7 +186,7 @@ IPARM	equ	08Bh
 ;CALLB0_IX_IY, K_SIZE, CUR_BANK, CHGBNK - see the SDK file for full
 ;documentation).
 
-	INCLUDE ../../../../sdk/asm/constants/rom_bank_header.inc
+	INCLUDE asm/constants/rom_bank_header.inc
 
 
 ;-----------------------------------------------------------------------------
@@ -232,7 +232,7 @@ DRV_NAME:
 ; to the Nextor v3 driver structure
 
 
-	INCLUDE ../../../../sdk/asm/code/output_string.asm
+	INCLUDE asm/code/output_string.asm
 
 
 	;--- Driver query

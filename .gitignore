@@ -1,0 +1,10 @@
+# Build outputs
+/bin/
+/tmp/
+
+# Editors / IDEs
+.vs/
+.vscode/
+
+# External submodules and components
+external/
