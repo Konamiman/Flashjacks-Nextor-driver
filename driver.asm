@@ -1,12 +1,9 @@
-	; Driver for the FLASHJACKS IDE interface for Nextor
+	; Device-based driver for the FLASHJACKS SD interface for Nextor
 	;
-	; By Aquijacks v1.4
-	; Based on version 0.1 by Konamiman and 0.15 by Piter Punk
+	; By Aquijacks v3.0.1 2026
 
-	;output	"sunride_aquijacks.bin"
-
+	; Nestor80 / Nextor 3 includes
 	INCLUDE asm/macros/undoc.inc
-
 	INCLUDE asm/constants/driver_result_codes.inc
 
 	module DRIVER_QUERY
@@ -31,22 +28,13 @@ TESTADD	equ	0F3F5h
 ; Driver configuration constants
 ;
 
+DEBUG		equ	0	;Set to 1 for debugging, 0 to normal operation
 
 ;Driver version
 
-VER_MAIN	equ	1
-VER_SEC		equ	4
+VER_MAIN	equ	3
+VER_SEC		equ	0
 VER_REV		equ	1
-
-
-;Page-3 work area layout (allocated via NEXTOR2_DRV_INIT first call).
-;The first 8 bytes preserve the original SLTWRK layout
-;(master flag at +0, slave flag at +4); STRBUFF is a 65-byte scratch
-;buffer used by the DEVICE_QUERY GET_STRING compatibility wrapper
-;(64 bytes of NEXTOR2_DEV_INFO image plus a trailing terminator).
-
-WRKAREA_STRBUFF	equ	8
-WRKAREA_SIZE	equ	WRKAREA_STRBUFF + 65
 
 ;This is a very barebones driver. It has important limitations:
 ;- CHS mode not supported, disks must support LBA mode.
@@ -74,20 +62,20 @@ IDE_LBAHIGH	equ	7E05h	;Logical sector high (LBA mode)
 IDE_HEAD	equ	7E06h	;bits 0-3: Head (CHS mode), logical sector higher (LBA mode)
 IDE_STATUS	equ	7E07h	;Status register
 IDE_CMD		equ	7E07h	;Command register
-IDE_FLASHJACKS	equ	7E09h	;Registro FlashJacks
+IDE_FLASHJACKS	equ	7E09h	;FlashJacks register
+IDE_IDIOMA	equ	7E0Ah	;Selected language
+IDE_RAM1	equ	7E0Bh	;Free-use RAM byte 1
+IDE_RAM2	equ	7E0Ch	;Free-use RAM byte 2
 IDE_DEVCTRL	equ	7E0Eh	;Device control register
 
 ; Bits in the error register
 
-UNC	equ	6	;Uncorrectable Data Error
 WP	equ	6	;Write protected
 MC	equ	5	;Media Changed
 IDNF	equ	4	;ID Not Found
 MCR	equ	3	;Media Change Requested
 ABRT	equ	2	;Aborted Command
 NM	equ	1	;No media
-
-M_ABRT	equ	(1 SHL ABRT)
 
 ; Bits in the head register
 
@@ -117,14 +105,122 @@ SRST	equ	2	;Software reset
 
 M_SRST	equ	(1 SHL SRST)
 
+; Routine to Bypass the HB-F1, HB-F1II and HB-F9P/S Firmware
+
+H_STKE	equ	0FEDAh
+H_TIMI	equ	0FD9Fh
+RDSLT	equ	0000Ch		; Read a byte in a slot
+WRSLT	equ	00014h		; Write a byte in a slot
 
 ;-----------------------------------------------------------------------------
 ;
 ; Standard BIOS and work area entries
 
+; CHPUT is provided by DRIVER_CHPUT below
+CHGET	equ	009Fh
 CLS	equ	00C3h
 MSXVER	equ	002Dh
 
+;-----------------------------------------------------------------------------
+;
+;Keyboard interception variables.
+
+;CRITICAL MEMORY ADDRESSES:
+NEWKEY      equ  0FBE5h  ;Current keyboard matrix (11 bytes)
+OLDKEY      equ  0FBF0h  ;Previous keyboard matrix (11 bytes - KEYBUF in BIOS)
+KEYBUF      equ  0FBF0h  ;Keyboard circular buffer (40 bytes)
+PUTPNT      equ  0F3F8h  ;Buffer write pointer
+GETPNT      equ  0F3FAh  ;Buffer read pointer
+COUNTER_REP equ  0FD9Eh  ;Keyboard repeat counter. Stored in RAM. It is the last byte of H.KEYI. I don't think it is ever used.
+REPCNT      equ  0F3F7h  ;Interval until keyboard repeat (BIOS)
+
+;CONFIGURATION CONSTANTS
+DELAY_INICIAL   equ  18  ;Initial delay before repetition (300ms @ 60Hz)
+INTERVALO_REP   equ  2   ;Interval between repetitions (33ms @ 60Hz)
+
+;Bit masks to identify modifier keys
+;Row 6: F3,F2,F1,CODE,CAPS,GRAPH,CTRL,SHIFT (bits 0-4)
+MASK_MODIFIERS  equ  00010111b  ;Bits 0-4 are modifier keys
+
+; ============================================================================
+;MSX SYSTEM CONSTANTS FOR SHADOWING
+; ============================================================================
+PSLOT_PORT      EQU     0A8H    ;Main Slot Selection Register port
+ENASLT          EQU     0024H   ;BIOS: Enable slot on a specific page
+EXPTBL          EQU     0FCC1H  ;Table of expanded slots (8 bytes)
+SLTTBL          EQU     0FCC5H  ;Secondary slot table (4 bytes)
+SLOT_PRIMARY    EQU     00H     ;Slot 0 (BIOS ROM)
+SLOT_RAM        EQU     03H     ;Slot 3 (Internal RAM - MSX assumption)
+START_ADDRESS   EQU     0000H   ;BIOS start address (0000h)
+BIOS_SIZE       EQU     4000H   ;Complete 16 KB BIOS (16384 bytes)
+
+; ============================================================================
+;RAM VARIABLES FOR BIOS SHADOWING (0F5D0H onwards)
+; ============================================================================
+SHADOW_SAVED_SLOTS  EQU 0F5D0H  ;1 byte: Original A8h port configuration
+SHADOW_BIOS_SLOT    EQU 0F5D1H  ;1 byte: BIOS ROM slot ID
+SHADOW_RAM_SLOT     EQU 0F5D2H  ;1 byte: Destination RAM slot ID
+SHADOW_SUCCESS      EQU 0F5D3H  ;1 byte: Success flag (1=OK, 0=Error)
+SHADOW_PATCH_COUNT  EQU 0F5D4H  ;1 byte: Number of patches applied (debug)
+
+
+;-----------------------------------------------------------------------------
+; Macros:
+
+;-----------------------------------------------------------------------------
+;
+;Sends the HL port to the DE output port and increments both pointers.
+;Memory copy.
+ldi_1 macro
+	;ld a,(hl)
+	;ld (de),a
+	;inc hl
+	;inc de
+	ldi
+endm
+
+ldi_10 macro
+	ldi_1
+	ldi_1
+	ldi_1
+	ldi_1
+	ldi_1
+	ldi_1
+	ldi_1
+	ldi_1
+	ldi_1
+	ldi_1
+endm
+
+ldi_100 macro
+	ldi_10
+	ldi_10
+	ldi_10
+	ldi_10
+	ldi_10
+	ldi_10
+	ldi_10
+	ldi_10
+	ldi_10
+	ldi_10
+endm
+
+ldi_512 macro
+	ldi_100
+	ldi_100
+	ldi_100
+	ldi_100
+	ldi_100
+	ldi_10
+	ldi_1
+	ldi_1
+endm
+
+;-----------------------------------------------------------------------------
+;
+;End of macros.
+;
+;------------------------------------------------------------------------------
 
 ;-----------------------------------------------------------------------------
 ;
@@ -161,6 +257,12 @@ MSXVER	equ	002Dh
 
 ;-----------------------------------------------------------------------------
 ;
+; V3 page-3 work area: preserve the original first 8 bytes and add a
+; 65-byte scratch buffer used to adapt the old DEV_INFO strings to the
+; length-limited Nextor v3 DEVICE_QUERY GET_STRING interface.
+WRKAREA_STRBUFF	equ	8
+WRKAREA_SIZE	equ	WRKAREA_STRBUFF+65
+
 ; Error codes for DEV_RW and DEV_FORMAT
 ;
 
@@ -182,11 +284,73 @@ IPARM	equ	08Bh
 ; Routines available on kernel page 0
 ;
 
-;Routines available on kernel page 0 (GSLOT1, RDBANK, CALLB0, CALBNK, GWORK,
-;CALLB0_IX_IY, K_SIZE, CUR_BANK, CHGBNK - see the SDK file for full
-;documentation).
+;* Get in A the current slot for page 1. Corrupts F.
+;  Must be called by using CALBNK to bank 0:
+;  xor a
+;  ld ix,GSLOT1
+;  call CALBNK
 
-	INCLUDE asm/constants/rom_bank_header.inc
+GSLOT1	equ	402Dh
+
+
+;* This routine reads a byte from another bank.
+;  Must be called by using CALBNK to the desired bank,
+;  passing the address to be read in HL:
+;  ld a,bank
+;  ld hl,address
+;  ld ix,RDBANK
+;  call CALBNK
+
+RDBANK	equ	403Ch
+
+
+;* This routine temporarily switches kernel bank 0/3,
+;  then jumps to CALBAS in MSX BIOS.
+;  This is necessary so that kernel bank is correct in case of BASIC error.
+
+CALBAS	equ	403Fh
+
+
+;* Call a routine in another bank.
+;  Must be used if the driver spawns across more than one bank.
+;  Input: A = bank
+;         IX = routine address
+;         AF' = AF for the routine
+;         BC, DE, HL, IY = input for the routine
+
+CALBNK	equ	4042h
+
+
+;* Get in IX the address of the SLTWRK entry for the slot passed in A,
+;  which will in turn contain a pointer to the allocated page 3
+;  work area for that slot (0 if no work area was allocated).
+;  If A=0, then it uses the slot currently switched in page 1.
+;  Returns A=current slot for page 1, if A=0 was passed.
+;  Corrupts F.
+;  Must be called by using CALBNK to bank 0:
+;  ld a,slot
+;  ex af,af'
+;  xor a
+;  ld ix,GWORK
+;  call CALBNK
+
+GWORK	equ	4045h
+
+
+;* Call a routine in the driver bank.
+;  Input: (BK4_ADD) = routine address
+;         AF, BC, DE, HL, IY = input for the routine
+;
+; Calls a routine in the driver bank. This routine is the same as CALBNK,
+; except that the routine address is passed in address BK4_ADD (#F2ED)
+; instead of IX, and the bank number is always 5. This is useful when used
+; in combination with CALSLT to call a driver routine from outside
+; the driver itself.
+;
+; Note that register IX can't be used as input parameter, it is
+; corrupted before reaching the invoked code.
+
+CALDRV	equ	4048h
 
 
 ;-----------------------------------------------------------------------------
@@ -200,330 +364,593 @@ SING_DBL  equ     7420h ;"1-Single side / 2-Double side"
 
 ;-----------------------------------------------------------------------------
 ;
-	;Driver signature
-
+; Driver signature
+;
+;-----------------------------------------------------------------------------
+; Nextor v3 fixed driver entry table.
+; This repository version uses the NEXTORv3_DRIVER entry format used by
+; Nextor 3 and by source/drivers/standalone-rom-driver.asm.
+;
 	db	"NEXTORv3_DRIVER",0
 
-	;Jump table
-
-	jp	DRV_TIMI ;TIMER_INT
-	jp	DRV_BASSTAT ;OEMSTAT
-	jp	DRV_BASDEV ;BASDEV
-	jp	DRV_EXTBIO ;EXTBIO
+	jp	DRV_TIMI
+	jp	DRV_BASSTAT
+	jp	DRV_BASDEV
+	jp	DRV_EXTBIO
 	jp	DRIVER_QUERY
 	jp	DEVICE_QUERY
 	jp	CUSTOM_DRIVER_QUERY
 	jp	CUSTOM_DEVICE_QUERY
 	jp	READ_WRITE
+	jp	RESERVED_0
+	jp	RESERVED_1
+	jp	RESERVED_2
+	jp	DRV_DIRECT0
+	jp	DRV_DIRECT1
+	jp	DRV_DIRECT2
+	jp	DRV_DIRECT3
+	jp	DRV_DIRECT4
 
-	; 3 reserved entries + 5 direct call entries
-	rept 8*3
-	ret
-	endm
+; End of the fixed v3 entry data.
 
+; Driver query / device query code follows.
 
-DRV_NAME:
-	db	"FlashJacks IDE",0
-
-
-;-----------------------------------------------------------------------------
-;
-; Compatibility layer for translating Nextor v2 driver routines
-; to the Nextor v3 driver structure
-
-
-	INCLUDE asm/code/output_string.asm
-
-
-	;--- Driver query
-	;    Input:  A = Query index
-	;            F, BC, DE, HL = Depends on the query
-	;    Output: A = Error code:
-	;                RESULT_OK: success
-	;                RESULT_NOT_IMPLEMENTED: query not implemented
-	;                Others: depends on the query
-	;            F, BC, DE, HL = Depends on the query
+;=============================================================================
+; Nextor v3 query interface
+;=============================================================================
 
 DRIVER_QUERY:
-	dec a
-	jr z,DO_DRVQ_GET_VERSION
-	dec a
-	jr z,DO_DRVQ_GET_STRING
-	dec a
-	jr z,DO_DRVQ_GET_INIT_PARAMS
-	dec a
-	jr z,DO_DRVQ_INIT
-	dec a
-	jr z,DO_DRVQ_GET_MAX_DEVICE
-	ld a,RESULT_NOT_IMPLEMENTED
+	dec	a
+	jr	z,DO_DRVQ_GET_VERSION
+	dec	a
+	jr	z,DO_DRVQ_GET_STRING
+	dec	a
+	jr	z,DO_DRVQ_GET_INIT_PARAMS
+	dec	a
+	jr	z,DO_DRVQ_INIT
+	dec	a
+	jr	z,DO_DRVQ_GET_MAX_DEVICE
+	ld	a,RESULT_NOT_IMPLEMENTED
 	ret
 
+; Query 1: driver version. Nextor v3 returns B.C.D, with A as result code.
 DO_DRVQ_GET_VERSION:
-	call NEXTOR2_DRV_VERSION
-	ld d,c
-	ld c,b
-	ld b,a
-	xor a
+	ld	b,VER_MAIN
+	ld	c,VER_SEC
+	ld	d,VER_REV
+	xor	a
 	ret
 
+; Query 2: driver identification strings.
 DO_DRVQ_GET_STRING:
-	ld a,b	;String index
-	ld b,d	;Buffer size
-	ex de,hl
-	dec a
-	ld hl,DRV_NAME
-	jp z,OUTPUT_STRING
-	ld a,RESULT_NOT_IMPLEMENTED
+	ld	a,b
+	ld	b,d
+	ex	de,hl
+	dec	a
+	ld	hl,V3_STR_DRIVER_NAME
+	jp	z,OUTPUT_STRING
+	dec	a
+	ld	hl,V3_STR_DRIVER_AUTHOR
+	jp	z,OUTPUT_STRING
+	dec	a
+	ld	hl,V3_STR_HARDWARE_NAME
+	jp	z,OUTPUT_STRING
+	dec	a
+	ld	hl,V3_STR_HARDWARE_AUTHOR
+	jp	z,OUTPUT_STRING
+	; Serial number is hardware-dependent and is exposed by DEVICE_QUERY.
+	ld	a,RESULT_NOT_IMPLEMENTED
 	ret
 
+; Query 3: initialization parameters.
+; The legacy DRV_INIT first pass still decides whether TIMER must be hooked.
 DO_DRVQ_GET_INIT_PARAMS:
-	push de
-	pop iy
-	xor a
-	call NEXTOR2_DRV_INIT
-	ld b,0
-	rl b
-	xor a
+	xor	a
+	call	DRV_INIT
+	ld	b,0
+	rl	b			; Carry from DRV_INIT -> output flag bit 0
+	xor	a
 	ret
 
+; Query 4: initialize the ROM driver.
+; DE is the kernel character-output routine used by the legacy init code.
 DO_DRVQ_INIT:
-	push de
-	pop iy
-	ld a,1
-	call NEXTOR2_DRV_INIT
-	xor a
+	bit	7,c			; Not enough page-3 work area?
+	jr	nz,DO_DRVQ_INIT_ERROR
+	push	de
+	pop	iy
+	ld	a,1
+	call	DRV_INIT
+	xor	a
+	ret
+DO_DRVQ_INIT_ERROR:
+	ld	a,RESULT_INIT_ERROR
 	ret
 
+; Query 5: FlashJacks has two device slots: master and slave.
 DO_DRVQ_GET_MAX_DEVICE:
-	ld b,2
-	xor a
+	ld	b,2
+	xor	a
 	ret
 
-CHPUT: jp (iy)
+; Character output adapter used by the old FlashJacks initialization code.
+DRIVER_CHPUT:
+	jp	(iy)
 
-
-	;--- Device query
-	;    Input:  A = Query index
-	;            C = Device number
-	;            F, B, DE, HL = Depends on the query
-	;    Output: A = Error code:
-	;                RESULT_OK: success
-	;                RESULT_INVALID_DEVICE: Invalid device number
-	;                RESULT_NOT_IMPLEMENTED: query not implemented
-	;                Others: depends on the query
-	;            F, BC, DE, HL = Depends on the query
+;=============================================================================
+; Nextor v3 DEVICE_QUERY
+;=============================================================================
 
 DEVICE_QUERY:
-	push af
-	ld a,c
-	or a
-	jr z,INVALID_DEVICE
-	cp 3
-	jr nc,INVALID_DEVICE
-
-	pop af
-	dec a
-	jr z,DO_DEVQ_GET_STRING
-	dec a
-	jp z,DO_DEVQ_GET_PARAMS
-	dec a
-	jp z,DO_DEVQ_GET_STATUS
-	dec a
-	jp z,DO_DEVQ_GET_AVAILABILITY
-	ld a,RESULT_NOT_IMPLEMENTED
+	dec	a
+	jr	z,DO_DEVQ_GET_STRING
+	dec	a
+	jp	z,DO_DEVQ_GET_PARAMS
+	dec	a
+	jp	z,DO_DEVQ_GET_STATUS
+	dec	a
+	jp	z,DO_DEVQ_GET_AVAILABILITY
+	dec	a
+	jp	z,DO_DEVQ_GET_FORMAT_CHOICES
+	dec	a
+	jp	z,DO_DEVQ_DO_FORMAT
+	dec	a
+	jp	z,DO_DEVQ_STOP_MOTOR
+	ld	a,RESULT_NOT_IMPLEMENTED
 	ret
 
-INVALID_DEVICE:
-	pop af
-	ld a,RESULT_INVALID_DEVICE
+; Validate C=device and make sure the corresponding legacy work-area entry
+; says that the device was detected during initialization.
+; Carry set = invalid/non-existing device.
+V3_CHECK_DEVICE:
+	ld	a,c
+	or	a
+	jr	z,V3_CHECK_DEVICE_BAD
+	cp	3
+	jr	nc,V3_CHECK_DEVICE_BAD
+	call	MY_GWORK
+	ld	a,(ix)
+	or	a
+	ret	nz			; Existing device, carry cleared by OR A
+V3_CHECK_DEVICE_BAD:
+	scf
 	ret
 
+; Device query 1: identification strings.
+; B=1 manufacturer, 2 medium, 3 serial, 4 device name.
 DO_DEVQ_GET_STRING:
-	ld a,b
-	or a
-	jp z,RETURN_NOT_IMP
+	push	bc
+	ld	a,c
+	call	V3_CHECK_DEVICE
+	pop	bc
+	jr	c,V3_DEVQ_INVALID
 
-	cp 4
-	jp z,DO_DEVQ_GET_DEV_NAME
-
-	ld a,d
-	or a
-	ret z	   ;Buffer size=0: do nothing, no error
-	dec a
-	jr nz,DO_DEVQ_GET_STRING_2
-	ld (hl),0  ;Buffer size=1: just output terminating 0, no error
+	ld	a,b
+	cp	3
+	jr	z,V3_DEVQ_STRING_OLD
+	cp	4
+	jr	z,V3_DEVQ_STRING_OLD
+	ld	a,RESULT_NOT_IMPLEMENTED
 	ret
 
-DO_DEVQ_GET_STRING_2:
-	;HL=user buf, D=user size, B=substring code, C=device number
-	;
-	;Flashjacks NEXTOR2_DEV_INFO ignores the user buffer size and always
-	;writes a fixed-layout 64-byte image to its HL argument:
-	;
-	;   substring 2 (device name): 40 chars at offsets  0..39, then spaces
-	;   substring 3 (serial)     : spaces, 20 chars at offsets 44..63
-	;
-	;The wrapper therefore points it at a scratch buffer in the page-3
-	;work area, then writes a zero terminator at the end of the actual
-	;content and copies the substring into the user buffer with
-	;OUTPUT_STRING (which handles the truncation / RESULT_TRUNCATED_STRING
-	;accounting against D).
+V3_DEVQ_STRING_OLD:
+	; Preserve the user's destination and size while DEV_INFO fills the
+	; legacy 64-byte image in the driver's page-3 scratch area.
+	push	hl
+	push	de
+	push	bc
 
-	push hl                     ;[SP+4] user buffer
-	push de                     ;[SP+2] user size (D=size)
-	push bc                     ;[SP+0] B=substring, C=device
+	ld	a,c
+	call	MY_GWORK
+	push	ix
+	pop	hl
+	ld	de,WRKAREA_STRBUFF
+	add	hl,de			; HL = scratch buffer
 
-	xor a
-	call MY_GWORK               ;IX = page-3 work area base
+	pop	bc			; B=subquery, C=device
+	push	bc			; Preserve for after DEV_INFO
+	push	hl			; Preserve scratch address
 
-	push ix
-	pop hl
-	ld bc,WRKAREA_STRBUFF
-	add hl,bc                   ;HL = STRBUFF base
+	ld	a,c
+	cp	3
+	jr	z,V3_DEVQ_SERIAL
+	ld	b,2			; Old DEV_INFO: 2=device name
+	jr	V3_DEVQ_CALL_INFO
+V3_DEVQ_SERIAL:
+	ld	b,3			; Old DEV_INFO: 3=serial number
+V3_DEVQ_CALL_INFO:
+	call	DEV_INFO
 
-	pop bc                      ;Restore B=substring, C=device
-	push bc                     ;Re-save for after NEXTOR2_DEV_INFO
-	push hl                     ;Save STRBUFF for after NEXTOR2_DEV_INFO
+	pop	hl			; Scratch
+	pop	bc			; Original B/C
+	or	a
+	jr	nz,V3_DEVQ_STRING_FAIL
 
-	ld a,c                      ;A = device number for NEXTOR2_DEV_INFO
-	call NEXTOR2_DEV_INFO       ;A = result code
+	; DEV_INFO pads the legacy image with spaces. It writes the device
+	; name at offset 0 and the serial number at offset 44.
+	ld	a,b
+	cp	3
+	jr	z,V3_DEVQ_SERIAL_PTR
+	ld	hl,WRKAREA_STRBUFF
+	push	ix
+	pop	de
+	add	hl,de
+	jr	V3_DEVQ_STRING_DEST
+V3_DEVQ_SERIAL_PTR:
+	ld	hl,WRKAREA_STRBUFF
+	push	ix
+	pop	de
+	add	hl,de
+	ld	bc,44
+	add	hl,bc
+V3_DEVQ_STRING_DEST:
+	pop	de			; DE = user buffer size
+	ld	b,d			; B = user buffer size
+	pop	de			; DE = user buffer
+	jp	OUTPUT_STRING
 
-	pop hl                      ;HL = STRBUFF
-	pop bc                      ;B = substring, C = device
+V3_DEVQ_STRING_FAIL:
+	pop	de			; User size
+	pop	hl			; User buffer
+	ld	a,RESULT_NOT_IMPLEMENTED
+	ret
 
-	or a
-	jr nz,DO_DEVQ_GET_STRING_FAIL
+V3_DEVQ_INVALID:
+	ld	a,RESULT_INVALID_DEVICE
+	ret
 
-	;Place a 0 at the end of the actual content so OUTPUT_STRING
-	;can detect the real string length:
-	;  substring 2 (device name): terminator at STRBUFF+40
-	;  substring 3 (serial)     : terminator at STRBUFF+64
-	push hl
-	ld de,40
-	ld a,b
-	cp 3
-	jr nz,DO_DEVQ_GET_STRING_TERM
-	ld de,64
-DO_DEVQ_GET_STRING_TERM:
-	add hl,de
-	ld (hl),0
-	pop hl                      ;HL = STRBUFF
-
-	;For the serial number, point the source past the 44 bytes of left
-	;padding NEXTOR2_DEV_INFO writes before the content.
-	ld a,b
-	cp 3
-	jr nz,DO_DEVQ_GET_STRING_SRC
-	ld de,44
-	add hl,de                   ;HL = STRBUFF + 44
-DO_DEVQ_GET_STRING_SRC:
-
-	;Stack: [user_size, user_buf]. HL is the zero-terminated source.
-	pop de                      ;D = user size
-	ld b,d                      ;B = max length for OUTPUT_STRING
-	pop de                      ;DE = user buffer (destination)
-	jp OUTPUT_STRING
-
-DO_DEVQ_GET_STRING_FAIL:
-	;Stack: [user_size, user_buf]
-	pop de
-	pop hl
-	jp RETURN_NOT_IMP
-
-DO_DEVQ_GET_DEV_NAME:
-	ex de,hl
-	ld b,h                      ;B = user buffer size (was D)
-
-	ld a,c
-	dec a
-	ld hl,MASTER_DEV_S
-	jp z,OUTPUT_STRING
-	ld hl,SLAVE_DEV_S
-	jp OUTPUT_STRING
-
+; Device query 2: device parameters.
+; The legacy LUN_INFO layout is almost identical to the v3 parameter block.
 DO_DEVQ_GET_PARAMS:
-	ld a,h
-	or l
-	ret z	;No buffer: just return no error (device id is ok)
+	push	hl
+	ld	a,c
+	call	V3_CHECK_DEVICE
+	pop	hl
+	jr	c,V3_DEVQ_INVALID
+	ld	a,h
+	or	l
+	ret	z			; Valid device, caller requested no buffer
 
-	ld a,c
-	ld b,1
-	call NEXTOR2_LUN_INFO
-	or a
-	ret z
+	ld	a,c
+	ld	b,1			; FlashJacks implements one LUN per device
+	call	LUN_INFO
+	or	a
+	ret	z
 
-	;Assume error is "device not available" (we checked the device id first),
-	;then return default parameters but with removable bit set
-	push hl
-	pop ix
-	xor a
-	ld (ix),a
-	ld (ix+1),a
-	ld (ix+2),2	;Sector size, high byte
-	ld (ix+3),a
-	ld (ix+4),a
-	ld (ix+5),a
-	ld (ix+6),a
-	ld (ix+7),1	;Removable flag
-	ld (ix+8),a
-	ld (ix+9),a
-	ld (ix+10),a
-	ld (ix+11),a
-	xor a
+	; Device exists but the medium may currently be unavailable. Return
+	; useful default parameters instead of reporting a non-existing device.
+	push	hl
+	pop	ix
+	xor	a
+	ld	(ix+0),a		; Block device
+	ld	(ix+1),a
+	ld	(ix+2),2		; 512-byte sectors
+	ld	(ix+3),a
+	ld	(ix+4),a
+	ld	(ix+5),a
+	ld	(ix+6),a		; Unknown capacity
+	ld	(ix+7),1		; Removable
+	ld	(ix+8),a
+	ld	(ix+9),a
+	ld	(ix+10),a
+	ld	(ix+11),a
+	xor	a
 	ret
 
+; Device query 3: device/medium change status.
 DO_DEVQ_GET_STATUS:
+	call	V3_DEVQ_READ_MEDIA_STATUS
+	ret
+
+; Device query 4: availability without consuming the media-change state.
 DO_DEVQ_GET_AVAILABILITY:
-	ld a,c
-	ld b,1
-	call NEXTOR2_DEV_STATUS
-	ld b,a
-	;Assume A=0 means "device not available" and not "invalid device id"
-	;(we checked the device id first)
-	xor a
+	call	V3_DEVQ_READ_MEDIA_AVAILABILITY
+	ret
+
+; Read the FlashJacks error/status register and translate its bits to v3.
+V3_DEVQ_READ_MEDIA_STATUS:
+	call	V3_CHECK_DEVICE
+	jr	c,V3_DEVQ_INVALID
+	di
+	call	IDE_ON
+	ld	a,(IDE_ERROR)
+	ld	b,a
+	call	IDE_OFF
+	ld	a,b
+	bit	NM,a
+	jr	nz,V3_MEDIA_ABSENT
+	bit	MC,a
+	jr	nz,V3_MEDIA_CHANGED
+	ld	b,1
+	xor	a
+	ei
+	ret
+V3_MEDIA_ABSENT:
+	ld	b,0
+	xor	a
+	ei
+	ret
+V3_MEDIA_CHANGED:
+	ld	b,2
+	xor	a
+	ei
+	ret
+
+V3_DEVQ_READ_MEDIA_AVAILABILITY:
+	call	V3_CHECK_DEVICE
+	jr	c,V3_DEVQ_INVALID
+	di
+	call	IDE_ON
+	ld	a,(IDE_ERROR)
+	ld	b,a
+	call	IDE_OFF
+	ld	a,b
+	bit	NM,a
+	jr	nz,V3_AVAIL_ABSENT
+	ld	b,1
+	xor	a
+	ei
+	ret
+V3_AVAIL_ABSENT:
+	ld	b,0
+	xor	a
+	ei
+	ret
+
+; FlashJacks is not a floppy device and has no format/motor API.
+DO_DEVQ_GET_FORMAT_CHOICES:
+	ld	a,RESULT_NOT_IMPLEMENTED
+	ret
+DO_DEVQ_DO_FORMAT:
+	ld	a,RESULT_NOT_IMPLEMENTED
+	ret
+DO_DEVQ_STOP_MOTOR:
+	ld	a,RESULT_NOT_IMPLEMENTED
 	ret
 
 CUSTOM_DRIVER_QUERY:
-CUSTOM_DEVICE_QUERY:
-	ld a,RESULT_NOT_IMPLEMENTED
+	ld	a,RESULT_NOT_IMPLEMENTED
 	ret
 
+CUSTOM_DEVICE_QUERY:
+	ld	a,RESULT_NOT_IMPLEMENTED
+	ret
+
+; Nextor v3 read/write has no LUN parameter. The FlashJacks core is a
+; one-LUN-per-device v2 implementation, so force C=1.
 READ_WRITE:
-	push	af		;Save Cy (0 = read, 1 = write) and device number
-	or	a		;Device number 0 never exists
-	jr	z,RW_BADDEV
-	cp	3		;Only devices 1 and 2 exist
-	jr	nc,RW_BADDEV
-	pop	af
+	; Nextor v3: A=device, B=count, C=media descriptor (0 for block devices).
+	; Legacy FlashJacks DEV_RW expects C=LUN. There is one LUN per device,
+	; so translate the v3 call to C=1.
+	push	af
+	push	af
+	or	a
+	jr	z,V3_RW_BAD_DEVICE_EARLY
+	cp	3
+	jr	nc,V3_RW_BAD_DEVICE_EARLY
+	call	MY_GWORK
+	ld	a,(ix)
+	or	a
+	jr	z,V3_RW_BAD_DEVICE
+	pop	af			; discard validation copy
+	pop	af			; original AF, including Carry
 	ld	c,1
-	call	NEXTOR2_DEV_RW
-	cp	IDEVL		;The device number is valid, so an "invalid device"
-	ret	nz		;error from the old driver code actually means
-	ld	a,NRDY		;"device currently absent": return "not ready",
-	ret			;as the Nextor 3 driver interface requires
-RW_BADDEV:
-	pop	af
+	call	DEV_RW
+	ret
+
+V3_RW_BAD_DEVICE_EARLY:
+	pop	af			; validation copy
+V3_RW_BAD_DEVICE:
+	pop	af			; original AF
 	ld	a,IDEVL
 	ld	b,0
 	ret
 
-RETURN_NOT_IMP:
-	ld a,RESULT_NOT_IMPLEMENTED
-	ret
 
-MASTER_DEV_S:
-	db	"IDE master device",0
-SLAVE_DEV_S:
-	db	"IDE slave device",0
 
+	INCLUDE asm/code/output_string.asm
 
 ;-----------------------------------------------------------------------------
 ;
 ; Timer interrupt routine, it will be called on each timer interrupt
 ; (at 50 or 60Hz), but only if DRV_INIT returns Cy=1 on its first execution.
 
+; ============================================================================
+;MAIN TIMER INTERRUPT ROUTINE
+;Executed 50/60 times per second
+; ============================================================================
 DRV_TIMI:
-	ret
+        push af
+        push bc
+        push hl
+        push de
+        exx                     ; Preservar registros shadow
+        ex   af,af'             ; Preservar AF'
+        di                      ;Critical section
+
+        ; ====================================================================
+        ;PHASE 1: FAST KEYBOARD MATRIX SCAN FROM ALTERNATIVE PORT
+        ; ====================================================================
+        ;This scan reads from port 0DEh (FlashJacks alternative port)
+        ;and stores it in NEWKEY (FBE5h) for BIOS compatibility
+        
+        in   a,(0AAh)           ;Prepare PPI register C
+        and  0F0h               ;Clear bits 0-3 (row selection)
+        ld   c,a                ;C = base for row selection
+        ld   b,0Bh              ; 11 filas (0-10)
+        ld   hl,NEWKEY          ;Destination: NEWKEY area (BIOS compatible)
+        xor  a
+        ld   d,a                ;D=0: "no keys" flag
+
+scan_loop:
+        ld   a,c
+        out  (0AAh),a           ;Select row in PPI
+        in   a,(0DEh)           ;Read from FlashJacks ALTERNATIVE port
+        ld   (hl),a             ; Almacenar en NEWKEY
+        
+        cp   0FFh               ;All keys released?
+        jr   z,scan_next        ;Yes, continue
+        ld   d,01h              ;Mark that keys are pressed
+        
+scan_next:
+        inc  c                  ;Next row
+        inc  hl                 ;Next NEWKEY byte
+        djnz scan_loop          ; Repetir para 11 filas
+
+        ; ====================================================================
+        ;PHASE 2: INTELLIGENT CHANGE ANALYSIS
+        ; ====================================================================
+        ld   a,d
+        or   a
+        jr   nz,hay_tecla       ;Keys are pressed
+        
+        ; --------------------------------------------------------------------
+        ;NO KEYS PRESSED - Cleanup and reset
+        ; --------------------------------------------------------------------
+sin_tecla:
+        xor  a
+        ld   (COUNTER_REP),a    ;Reset repetition counter
+        
+        ;Clear keyboard buffer (40 bytes from FBF0h)
+        ld   hl,KEYBUF
+        ld   de,KEYBUF+1
+        ld   bc,39
+        ld   (hl),0
+        ldir
+        
+        ; Resetear punteros
+        ld   hl,KEYBUF
+        ld   (PUTPNT),hl        ;PUTPNT = buffer start
+        ld   (GETPNT),hl        ;GETPNT = buffer start
+        
+        jr   fin_timi
+
+        ; --------------------------------------------------------------------
+        ;KEYS PRESSED - Detailed analysis
+        ; --------------------------------------------------------------------
+hay_tecla:
+        ;First: Is it a SINGLE modifier key?
+        call CHECK_ONLY_MODIFIERS
+        jr   c,tecla_modificadora_sola
+        
+        ;It is a normal key or key + modifier
+        ;Manage repetition counter
+        ld   a,(COUNTER_REP)
+        inc  a
+        cp   2                ; Evitar overflow
+        jr   nz,no_overflow
+        ld   a,2
+no_overflow:
+        ld   (COUNTER_REP),a
+        
+        ;Decide whether to execute BIOS scan
+        cp   1                  ;First key press?
+        jr   z,ejecutar_scan
+        
+        cp   DELAY_INICIAL+1    ;Before initial delay?
+        jr   c,fin_timi         ;Yes, do nothing yet
+        jr   z,ejecutar_scan    ;Just after the delay, execute
+        
+        ;Calculate whether repetition is due (INTERVALO_REP modulo)
+        sub  DELAY_INICIAL+1
+mod_loop:
+        cp   INTERVALO_REP
+        jr   c,mod_check_zero
+        sub  INTERVALO_REP
+        jr   mod_loop
+mod_check_zero:
+        or   a
+        jr   nz,fin_timi        ;Not due yet
+
+ejecutar_scan:
+        ;Call BIOS routine for full processing
+        ei                      ;Enable interrupts for BIOS
+        call 0D26h              ;BIOS keyboard decoding routine
+        jr   fin_timi
+
+        ; --------------------------------------------------------------------
+        ;SINGLE MODIFIER KEY - Do not generate repetition
+        ; --------------------------------------------------------------------
+tecla_modificadora_sola:
+        ;SINGLE modifier keys must not:
+        ;- Increment repetition counter
+        ;- Generate characters in the buffer
+        ;- Call the decoding routine
+        
+        ;BUT they must:
+        ;- Update NEWKEY so other routines can see them
+        ;- Allow them to be read with SNSMAT
+        
+        xor  a
+        ld   (COUNTER_REP),a    ;Reset counter (no repetition)
+        ;Do not call 0D26h
+        jr   fin_timi
+
+        ; ====================================================================
+        ;PHASE 3: FINALIZATION
+        ; ====================================================================
+fin_timi:
+        ei                      ;Re-enable interrupts
+        ex   af,af'             ; Restaurar AF'
+        exx                     ; Restaurar registros shadow
+        pop  de
+        pop  hl
+        pop  bc
+        pop  af
+        ret
+
+; ============================================================================
+; SUBRUTINA: CHECK_ONLY_MODIFIERS
+;Check whether ONLY modifier keys are pressed (no normal keys)
+; 
+; Salida:
+;Cy = 1: Modifiers only (or no keys)
+;Cy = 0: Normal keys present (with or without modifiers)
+; ============================================================================
+CHECK_ONLY_MODIFIERS:
+        push hl
+        push bc
+        
+        ;Check rows 0-5 (normal keys)
+        ld   hl,NEWKEY
+        ld   b,6                ; Primeras 6 filas
+check_normal_loop:
+        ld   a,(hl)
+        cp   0FFh               ;Any key pressed in this row?
+        jr   nz,found_normal    ;Yes, normal key present
+        inc  hl
+        djnz check_normal_loop
+        
+        ;Check row 6 (modifiers) - bits 5-7 only
+        ;Bits 0-4 are modifiers, bits 5-7 are F1-F3
+        ld   a,(hl)             ; NEWKEY+6
+        or   MASK_MODIFIERS     ;Mask modifiers (bits 0-4)
+        cp   0FFh               ;Only modifiers or nothing?
+        jr   nz,found_normal    ;Bits 5-7 active = F1-F3 = normal key
+        
+        inc  hl
+        ;Check rows 7-10 (special and numeric keys)
+        ld   b,4
+check_special_loop:
+        ld   a,(hl)
+        cp   0FFh
+        jr   nz,found_normal
+        inc  hl
+        djnz check_special_loop
+        
+        ;Only modifiers (or no keys)
+        pop  bc
+        pop  hl
+        scf                     ; Cy = 1
+        ret
+
+found_normal:
+        ;At least one normal key
+        pop  bc
+        pop  hl
+        or   a                  ; Cy = 0
+        ret
+
 
 
 ;-----------------------------------------------------------------------------
@@ -560,89 +987,127 @@ DRV_TIMI:
 
 TEMP_WORK	equ	0C000h
 
-NEXTOR2_DRV_INIT:
-	;--- If first execution, request the page-3 work area (legacy
-	;    device-flag layout plus the GET_STRING scratch buffer).
+DRV_INIT:
+	;--- If first execution, just inform that no work area is needed
+	;    (the 8 bytes in SLTWRK are enough)
 
 	or	a
-	ld	hl,WRKAREA_SIZE
-	ld	a,2
-	ret	z			;Note that Cy is 0 (no interrupt hooking needed)
+	jr	nz,DRV_INIT2
+	
+	;First check whether to disable H.TIMI
+	push	af
+	call	IDE_ON 
+	ld      a,(IDE_FLASHJACKS) ;Read the FlashJacks register. (Count 1 for possible double reset)
+	and	00100000b ;Keep only the SOFTPORT bit
+	cp	020h ;Check bit marker.
+	jp	z,FORINIT2 ;If SOFTPORT is detected as 1, do not disable H.TIMI
+	;First execution: do not request timer hook
+	call	IDE_OFF	
+	pop	af
+	or	a		;← Cy=0: DISABLE DRV_TIMI for keyboard hook
+	ld	hl,WRKAREA_SIZE	; 8-byte legacy area + 65-byte v3 string scratch
+	ld	a,2		; 2 drives
+	ret	
+		
+FORINIT2:
+	;First execution: request timer hook
+	call	IDE_OFF	
+	pop	af
+	ld	hl,WRKAREA_SIZE	; 8-byte legacy area + 65-byte v3 string scratch
+	ld	a,2		; 2 drives
+	scf			;← Cy=1: ENABLE DRV_TIMI for keyboard hook
+	ret	
+	
+DRV_INIT2:
 
 	;xor a
 	;ld (TESTADD),a
 
-	;--- Borra la pantalla. En los MSX1 hay que decirselo ya que no lo tiene implementado de serie.
+	;--- Clear the screen. On MSX1 this must be done explicitly because it is not implemented by default.
 	
-	push	af ; Guarda las variables de inicio.
+	push	af ;Save the startup variables.
 	push	bc
 	push	hl
-	;bit	0,a ; Pone a cero el flag Z
-	;xor	a ; Pone a cero a
-	;call	CLS
-	;--- Este m�todo de borrado es mejor. Aportado por Victor.
-	ld	a,40 ; 40 columnas
-	ld	(0F3AEh),a
-	xor	a
-	call	005Fh ; Screen 0
+	
+	;-- Screen clearing is skipped in Nextor >= 3.0 so the Nextor options can be seen.
+		;bit	0,a ;Clear the Z flag
+		;xor	a ;Clear A
+		;call	CLS
+		;--- This screen-clearing method is better. Provided by Victor.
+		;ld	a,40 ; 40 columnas
+		;ld	(0F3AEh),a
+		;xor	a
+		;call	005Fh ; Screen 0
 
-	;--- Comprueba el bit de doble reset y lo ejecuta en caso de estar en on.
+	;--- Check the double-reset bit and execute it if it is on.
 	call	IDE_ON
-	ld      a,(IDE_FLASHJACKS) ; Trae el registro de Flashjacks. 
-	and	11110100b ; Anula los bits de freq y deja solo la marca de comprobaci�n y el bit de reset.
-	cp	0A4h ;	Comprueba marca de comprobaci�n y bit de reset
-	jr	nz,CONTPRG ; No ha detectado una marca correcta del registro flashjacks por lo que no ejecuta nada del reset.
+	ld      a,(IDE_FLASHJACKS) ;Read the FlashJacks register. (Count 2 for possible double reset)
+	and	00000100b ;Clear the freq and second-slot bits, leaving only the option marker bits.
+	cp	004h ;Check reset bit marker
+	jp	nz,CONTPRG ;No valid marker was detected in the FlashJacks register, so nothing is done for the reset.
 	call	IDE_OFF
-	pop	hl ; Retorno de las variables de inicio.
+	pop	hl ;Restore the startup variables.
 	pop	bc 
 	pop	af
-	rst	0 ; Fuerza un reset. A partir de aqu� hace un soft reset y no continua con el programa.
+	rst	0 ;Force a reset. From here a soft reset is performed and the program does not continue.
+
 CONTPRG:
 	call	IDE_OFF
-	
+
 	;----------------------------------------------
-	;Compruba las teclas F4 y F5 (VDP FREQ y fuerza TURBOCPU)
+	;Check F4 and F5 keys (VDP FREQ and force TURBOCPU)
 	push	af
 	push	hl
 	push	de
 	push	bc
 
-	; Compara tecla pulsada
+	;Check pressed key
 	ld	b,7 ;row 7 	RET 	SELECT 	BS 	STOP 	TAB 	ESC 	F5 	F4
 	in	a,(0AAh)
 	and	11110000b
 	or	b
 	out	(0AAh),a
-	in	a,(0A9h)	
-	bit	0,a ;F4 -- Si es tecla pulsada turbo va a la rutina de activaci�n del turbo.
-	jr	nz,Fin_ini ; Salta si no se pulsa tecla de turbo.
+	;Read from standard port A9h
+	in      a, (0A9h)       ;First read (standard port)
+	ld      c, a            ; Guardar en C
+	;Read from alternative port DEh
+	in      a, (0DEh)       ;Second read (alternative port)
+	;Combine both reads with AND
+	and     c               ; A = A9h AND DEh	
+	bit	0,a ;F4 -- If the key is pressed, turbo goes to the CPU turbo activation routine.
+	jp	nz,Fin_ini ;Skip if the turbo key is not pressed.
 	push	af
-	call	putTURBO_CPU ; Ejecuta el turbo CPU.
+	call	putTURBO_CPU ;Execute the CPU turbo.
 	pop	af
 Fin_ini:pop	bc
 	pop	de
 	pop	hl
 	pop	af
 	
-	;--- Comienza la escritura en pantalla del driver.	
+	
+	;-- Add an Enter to separate the Nextor >= 3.0 information from the FlashJacks information.
+	ld	de,CRLF_S
+	call	PRINT
+
+	;--- Begin writing the driver information on screen.
 	ld	de,INFO_S
 	call	PRINT
 	
-	;--- Saca por pantalla el modelo de ordenador.	
-	ld	de,MODELO ; Escribre Modelo:
+	;--- Display the computer model on screen.
+	ld	de,MODELO ;Write Model:
 	call	PRINT
-	ld      a,(MSXVER) ; Trae el registro de version de MSX de la BIOS
-	cp	00h ; Si es un MSX1 realiza un salto a la escritura de MSX1.
-	jr	z,IMP_MSX1 
-	cp	01h ; Si es un MSX2 realiza un salto a la escritura de MSX2.
-	jr	z,IMP_MSX2 
-	cp	02h ; Si es un MSX2+ realiza un salto a la escritura de MSX2+.
-	jr	z,IMP_MSX2M 
-	cp	03h ; Si es un MSX TurboR realiza un salto a la escritura de MSX TurboR.
-	jr	z,IMP_MSXR 
-	cp	04h ; Si es un OCM realiza un salto a la escritura de OCM.
-	jr	z,IMP_OCM 
-	jp	NO_DETEC ; Si no es ninguna de las versiones mencionadas, imprime un no detectado.
+	ld      a,(MSXVER) ;Read the MSX version register from the BIOS
+	cp	00h ;If it is an MSX1, jump to the MSX1 output.
+	jp	z,IMP_MSX1 
+	cp	01h ;If it is an MSX2, jump to the MSX2 output.
+	jp	z,IMP_MSX2 
+	cp	02h ;If it is an MSX2+, jump to the MSX2+ output.
+	jp	z,IMP_MSX2M 
+	cp	03h ;If it is an MSX TurboR, jump to the MSX TurboR output.
+	jp	z,IMP_MSXR 
+	cp	04h ;If it is an OCM, jump to the OCM output.
+	jp	z,IMP_OCM 
+	jp	NO_DETEC ;If none of the mentioned versions, print not detected.
 IMP_MSX1:
 	ld	de,M_MSX1
 	call	PRINT
@@ -667,11 +1132,11 @@ NO_DETEC:
 	ld	de,M_NDTC
 	call	PRINT
 FIN_IMP:
-	pop	hl ; Retorno de las variables de inicio.
+	pop	hl ;Restore the startup variables.
 	pop	bc 
 	pop	af
 
-	;-- B�squeda de la unidad por pantalla.
+	;-- Search for the drive on screen.
 	ld	de,SEARCH_S
 	call	PRINT
 
@@ -692,9 +1157,9 @@ WAIT_RESET:
 WAIT_RESET1:
         ld      a,0
         cp      e
-        jr      nz,WAIT_DOT		;Print dots while waiting
+        jp      nz,WAIT_DOT		;Print dots while waiting
         ld      a,46
-        call    CHPUT
+        call    DRIVER_CHPUT
 WAIT_DOT:
 	call	CHECK_ESC
 	jp	c,INIT_NO_DEV
@@ -703,34 +1168,20 @@ WAIT_RESET2:
         ld      a,(IDE_STATUS)
         and     M_BSY+M_DRDY
         cp      M_DRDY
-        jr      z,WAIT_RESET_END        ;Wait for BSY to clear and DRDY to set          
+        jp      z,WAIT_RESET_END        ;Wait for BSY to clear and DRDY to set          
         djnz    WAIT_RESET2
         dec     de
         ld      a,d
         or      e
-        jr      nz,WAIT_RESET1
+        jp      nz,WAIT_RESET1
         jp      INIT_NO_DEV
 WAIT_RESET_END:
 
-	;--- Do a quick pre-check on MASTER device
-
-	ld	a,0
-	ld	(IDE_HEAD),a		;Select device 0
-	nop
-
-	call	INIT_PRECHECK_DEV	
-	ld	a,(IDE_SECCNT)
-	cp	85
-	jr	nz,MASTER_CHECK1_END
-	ld	a,(IDE_SECNUM)
-	cp	170
-	jr	nz,MASTER_CHECK1_END
-
-	ld	a,1			;Flag the device
+	ld	a,1			;Flag the device 0
 	ld	(ix),a
 MASTER_CHECK1_END:
         ld      a,46			;Print dot
-        call    CHPUT
+        call    DRIVER_CHPUT
        
         ld      a,M_SRST		; Do ANOTHER software reset
         ld      (IDE_DEVCTRL),a
@@ -739,7 +1190,7 @@ MASTER_CHECK1_END:
         ld      (IDE_DEVCTRL),a
 	nop				;Wait 5 us
         ld      a,46			;Print dot
-        call    CHPUT
+        call    DRIVER_CHPUT
 
 	ld      de,CRLF_S
         call    PRINT
@@ -753,7 +1204,7 @@ WSKIPMAS:			; If ESC is pressed, ignore this device
         ld      de,624			; Wait 1s to read the keyboard
 WSKIPMAS1:
         call    CHECK_ESC
-        jr      c,NODEV_MASTER
+        jp      c,NODEV_MASTER
         ld      b,64
 WSKIPMAS2:
 	ex	(sp),hl
@@ -762,47 +1213,67 @@ WSKIPMAS2:
         dec     de
         ld      a,d
         or      e
-        jr      nz,WSKIPMAS1
+        jp      nz,WSKIPMAS1
 
 	ld	a,(ix)			;If the device isn't flagged it doesn't exists
 	cp	1
-	jr	nz,NODEV_MASTER
+	jp	nz,NODEV_MASTER
         ld      a,46			;Print FIRST dot
-        call    CHPUT
+        call    DRIVER_CHPUT
 
 	call	WAIT_CMD_RDY
-	jr	c,NODEV_MASTER
+	jp	c,NODEV_MASTER
 	ld	a,0
 	ld	(IDE_HEAD),a		;Select device 0
         ld      a,46			;Print SECOND dot
-        call    CHPUT
+        call    DRIVER_CHPUT
 
 	ld	a,0ECh			;Send IDENTIFY commad
 	call	DO_IDE			
-	jr	c,NODEV_MASTER
+	jp	c,NODEV_MASTER
         ld      a,46			;Print THIRD dot
-        call    CHPUT
+        call    DRIVER_CHPUT
 
 	call	INIT_CHECK_DEV		;Check if the device is ATA or ATAPI
-	jr	c,NODEV_MASTER
+	jp	c,NODEV_MASTER
         ld      a,46			;Print FOURTH dot
-        call    CHPUT
+        call    DRIVER_CHPUT
+
+	;Test IDIOMA, RAM1 and RAM2 commands. This must be entered with its IDE_ON call and its IDE_OFF at the end. <-- Delete this piece of program once tested.
+	;ld	a,(IDE_IDIOMA) ;Read the language variable 0 to 255 (0 Spanish, 1 English)
+	;add	a, 30h
+	;call	DRIVER_CHPUT
+
+	;ld	a,6 ;Put a 6
+	;ld	(IDE_RAM1), a ;Transfer it to an FPGA RAM byte (RAM1)
+	;xor	a ;Clear accumulator
+	;ld	a,(IDE_RAM1) ;Retrieve an FPGA RAM byte (RAM1)
+	;add	a, 30h
+	;call	DRIVER_CHPUT
+
+	;ld	a,9
+	;ld	(IDE_RAM2), a ;Transfer it to an FPGA RAM byte (RAM1)
+	;xor	a ;Clear accumulator
+	;ld	a,(IDE_RAM2) ;Retrieve an FPGA RAM byte (RAM1)
+	;add	a, 30h
+	;call	DRIVER_CHPUT
+	;End of IDIOMA, RAM1 and RAM2 command test.
 
 	call	WAIT_CMD_RDY		;Try to select the device
-	jr	c,NODEV_MASTER		;this is our last chance to *NOT* detect it
+	jp	c,NODEV_MASTER		;this is our last chance to *NOT* detect it
 	ld	a,0
 	ld	(IDE_HEAD),a		;Select device 0
         ld      a,46			;Print FIFTH dot
-        call    CHPUT
+        call    DRIVER_CHPUT
 
 	call	INIT_PRINT_NAME
 
 	ld	(ix),2	;ATA device with LBA
-	jr	OK_MASTER
+	jp	OK_MASTER
 
 NODEV_MASTER:
 	call	CHECK_ESC
-	jr	c,NODEV_MASTER
+	jp	c,NODEV_MASTER
 
 	ld	(ix),0	
 	ld	de,NODEVS_S
@@ -816,11 +1287,11 @@ OK_MASTER:
         xor     a
         ld      (IDE_DEVCTRL),a
 
-	jr	DRV_INIT_END
+	jp	DRV_INIT_END
 
 INIT_NO_DEV:
 	call	CHECK_ESC
-	jr	c,INIT_NO_DEV
+	jp	c,INIT_NO_DEV
 
 	ld      de,CRLF_S
         call    PRINT
@@ -829,20 +1300,20 @@ INIT_NO_DEV:
 	ld	de,NODEVS_S
 	call	PRINT
 		
-	;--- Fin del procedimiento de inicializaci�n.
+	;--- End of initialization procedure.
 
 DRV_INIT_END:
-	ld	(ix+4),0 ; Marca que no hay unidad esclava.
+	ld	(ix+4),0 ;Mark that there is no slave device.
 	call	IDE_OFF
 
-	;--- Retardo de espera de 2 Segundos para que se vea el texto de carga del driver en pantalla. 
-	;--- Si es un MSXTurboR no lo hace. Este ya tiene retardo de por si en el arranque.
+	;--- 2-second waiting delay so the driver loading text can be seen on screen.
+	;--- If it is an MSXTurboR, do not do it. It already has a startup delay.
 	push	de
 	push	bc
-	ld      a,(MSXVER) ; Trae el registro de version de MSX de la BIOS
-	cp	03h ; Si es un MSX TurboR realiza un salto ya que este equipo es lento de por si al arranque.
-	jr	z,ESPERA_FIN ; Omite la espera de 2s para el TurboR
-	ld	de,1861	;Contador cargado para 2s
+	ld      a,(MSXVER) ;Read the MSX version register from the BIOS
+	cp	03h ;If it is an MSX TurboR, jump because this machine is slow enough during startup.
+	jp	z,ESPERA_FIN ;Skip the 2s wait for TurboR
+	ld	de,1861	;Counter loaded for 2s
 ESPERA_RDY1:
 	ld	b,255
 ESPERA_RDY2:
@@ -850,53 +1321,59 @@ ESPERA_RDY2:
 	dec	de
 	ld	a,d
 	or	e
-	jr	nz,ESPERA_RDY1	;Bucle ESPERA_RDY1 
+	jp	nz,ESPERA_RDY1	;Bucle ESPERA_RDY1 
 ESPERA_FIN:
 	pop	bc
 	pop	de
 
-	;--- Codigo asistencia a la unidad FLASHJACKS. Se ejecuta despues del inicio de NEXTOR.
+	;--- FLASHJACKS device assistance code. Executed after NEXTOR startup.
 	call	IDE_ON
-	ld      a,(MSXVER) ; Trae el registro de version de MSX de la BIOS
-	cp	00h ; Si es un MSX1 salta la operaci�n de forzado del VDP por incompatibilidad del mismo.
-	jr	z,DEV_FLASH_FIN 
+	ld      a,(MSXVER) ;Read the MSX version register from the BIOS
+	cp	00h ;If it is an MSX1, skip the VDP forcing operation due to its incompatibility.
+	jp	z,DEV_FLASH_FIN 
 	
-	; Compara tecla pulsada
+	;Check pressed key
 	ld	b,7 ;row 7 	RET 	SELECT 	BS 	STOP 	TAB 	ESC 	F5 	F4
 	in	a,(0AAh)
 	and	11110000b
 	or	b
 	out	(0AAh),a
-	in	a,(0A9h)	
-	bit	1,a ;F5 -- Si es tecla pulsada VDP va a la rutina de permutaci�n de frecuencia.
-	jp	z,DEV_VDP_FIN ; Salta la gesti�n del VDP para la permutaci�n del VDP por tecla pulsada.
-	ld      a,(IDE_FLASHJACKS) ; Trae el registro de Flashjacks. 
-	and	11111011b ; Anula el bit de doble reset para comparar el resto.
-	cp	0A3h ;	Forzado a 60Hz. 101000 + Bit de Forzado a 1 + Bit de 60 Hz a 1
-	jr	z,DEV_FLASH60 ; Salta al forzado a 60 Hz.
-	cp	0A2h ;	Forzado a 50Hz. 101000 + Bit de Forzado a 1 + Bit de 50 Hz a 0
-	jr	z,DEV_FLASH50 ; Salta al forzado a 50 Hz.
-	jp	DEV_FLASH_FIN ; Otras opciones son ignoradas y no hace cambio alguno.
+	;Read from standard port A9h
+	in      a, (0A9h)       ;First read (standard port)
+	ld      c, a            ; Guardar en C
+	;Read from alternative port DEh
+	in      a, (0DEh)       ;Second read (alternative port)
+	;Combine both reads with AND
+	and     c               ; A = A9h AND DEh	
+	bit	1,a ;F5 -- If the key is pressed, VDP goes to the frequency switching routine.
+	jp	z,DEV_VDP_FIN ;Skip VDP handling for VDP frequency switching by pressed key.
+	ld      a,(IDE_FLASHJACKS) ;Read the FlashJacks register.
+	and	00000011b ;Pass through the forced-frequency bits.
+	cp	003h ;Forced to 60Hz. Force bit = 1 + 60 Hz bit = 1
+	jp	z,DEV_FLASH60 ;Jump to 60 Hz forcing.
+	cp	002h ;Forced to 50Hz. Force bit = 1 + 50 Hz bit = 0
+	jp	z,DEV_FLASH50 ;Jump to 50 Hz forcing.
+	jp	DEV_FLASH_FIN ;Other options are ignored and no change is made.
 
 DEV_FLASH50:
-	ld	a,02h ; 02h a 50hz y 00h a 60hz
+	ld	a,02h ;02h = 50Hz and 00h = 60Hz
 	jp	DEV_FLASHVDP;
 
 DEV_FLASH60:
-	ld	a,00h ; 02h a 50hz y 00h a 60hz
+	ld	a,00h ;02h = 50Hz and 00h = 60Hz
 
 DEV_FLASHVDP:
-	out	(099h),a ;Salida directa del VPD
-	ld	(0ffe8h), a ;Salida por BIOS del VDP registro 9
+	out	(099h),a ;Direct VDP output
+	ld	(0ffe8h), a ;Output through BIOS to VDP register 9
 	ld	a,89h
 	out	(099h),a
 
 DEV_FLASH_FIN:
 	call	IDE_OFF
-	ret ; Devuelve el control.
+	jp	NO_FIRM_BOOT ;Jump to the firmware boot-jump check for some MSX models.
 
 DEV_VDP_FIN:
-	; Ejecuta la permutaci�n del VDP existente
+	;Execute the existing VDP frequency switch
 	ld	hl,0ffe8h;VDP register value
 	ld	a,(hl)
 	xor	2
@@ -907,105 +1384,181 @@ DEV_VDP_FIN:
 	ei
 	out	(099h),a
 	call	IDE_OFF
-	ret ; Devuelve el control.
+	jp	NO_FIRM_BOOT ;Jump to the firmware boot-jump check for some MSX models.
+
+NO_FIRM_BOOT:;Firmware boot-jump check.
 	
-;--- Subroutines for the INIT procedure
+	call	IDE_ON
+	ld      a,(IDE_FLASHJACKS) ;Read the FlashJacks register.
+	and	00010000b ;Pass through the MSX firmware boot-jump marker
+	cp	010h ;Check MSX firmware boot-jump bit.
+	jp	nz,NULL_OTHER_SLOT ;No valid marker was detected in the FlashJacks register, so no MSX firmware boot jump is performed.
+	call	IDE_OFF
 
-;Check if there is any device listening in the bus
-;Input: device already selected
-;Output: If something is there, IDE_SECCNT=85, IDE_SECNUM=170
-;	 Both variables have random values if nothing is there
+	;---- Disable the internal boot. To continue, set a breakpoint on Hook #FEDA (Memory write watchpoint).
+	;---- Entirely created by Aquijacks (FlashJacks) 16/12/2023.
 
-INIT_PRECHECK_DEV:
-	ld	a,85
-	ld	(IDE_SECCNT),a
-	ld	a,170
-	ld	(IDE_SECNUM),a
-	ld	a,170
-	ld	(IDE_SECCNT),a
-	ld	a,85
-	ld	(IDE_SECNUM),a
-	ld	a,85
-	ld	(IDE_SECCNT),a
-	ld	a,170
-	ld	(IDE_SECNUM),a
+	;---- Verify through the hook that it is not a Panasonic.
+	ld	a,(#FEFE)
+	cp	#87
+	jp	nz, No_Panasonic
+	
+	;If it is a Panasonic, bypass FS-A1, FS-A1F and FS-A1mk2.
+	ld	a,#23
+	ld	(#CBD8),a	; Bypass FS-A1 firmware
+	ld	(#C3CE),a	; Bypass FS-A1F firmware
+	ld	(#C3D2),a	; Bypass FS-A1mk2 firmware
+	jp	NULL_OTHER_SLOT ;End of the story. Nothing else is needed.
+	 
+No_Panasonic:
+	;Verify that it is not a Sony HB-55/75P, continuing with the remaining models.
+	ld	a,0		; Slot 0
+	ld	hl,#8010	;Read the menu ROM.
+	call	RDSLT
+	ei			;RDSLT has a DI but no EI. We add it.
+	cp	#F3		; dato a comparar
+	jp	nz, No_HB_75
+	ld	a,0		; Slot 0
+	ld	hl,#8011	;Read the menu ROM.
+	call	RDSLT
+	ei			;RDSLT has a DI but no EI. We add it.
+	cp	#3E		; dato a comparar
+	jp	nz, No_HB_75	
+	jp	NULL_OTHER_SLOT	;Return control if it is an unpatched HB-75P, since these models detect disk and disable the menu.
+
+No_HB_75:
+	;Routine that bypasses the ROM on HB-F9P/S, HB-F1, HB-101/201P, Mitsubishi G1 Series, Toshiba Series H, National FS-4000/4500 and other models with the same system.
+	;Patch the instruction at address F38Fh from call #F398 to call #F460 (free memory)
+	ld	a,060h
+	ld	(#F390),a
+	ld	a,0F4h
+	ld	(#F391),a
+
+	;At memory #F460 add the "Adding" patch code to be executed.
+	ld	hl,Adding
+	ld	de,#F460
+	ld	bc,7Fh ;Number of bytes to copy. It is not exact but more than enough for the code to be inserted.
+	ldir
+	;This is a counter we create to abort after x patch-search attempts. If it calls address 00XX through the F390 jump, it aborts and restores its initial state.
+	ld	a, 30h    ;Number of attempts in hexadecimal.
+	ld	(#F4E0),a ;Any free memory address.
+
+	jp	NULL_OTHER_SLOT	 ;Return control. The RAM will now be patched with the small program. Now wait for the CPU to reach this location.
+
+Adding:
+	;Only access to the firmware menu performs the patch. On all other accesses to addresses F390, it jumps to IX as if nothing happened.
+	;IX contains the jump address. This routine is not only used for jumping to the firmware menu, so we will act only on that jump. We remain invisible for the rest.
+	push	af ;Save accumulator and flags because some MSX models are sensitive here to keeping the accumulator and flags unchanged.
+	ld	a,ixh
+	cp	#00
+	jr	z, Adding3 ;If it points to 00xxh memory, decrement the failed-attempt counter and, if it is the last one, unpatch and finish.
+	ld	a,ixh
+	cp	#40
+	jr	nz, Adding2 ;If it does not point to 40xxh memory, jump.
+	ld	a,ixl
+	cp	#49 ;4049h start address of HB-F1
+	jr	z, Adding4
+	cp	#10 ;4010h start address of HB-F9S / Mitsubishi G1 / Toshiba Series H
+	jr	z, Adding4
+	cp	#43 ;4043h start address of HB-201
+	jr	z, Adding4
+	cp	#4C ;404Ch start address of HB-F1II
+	jr	z, Adding4
+	cp	#3B ;403Bh start address of National FS-4500
+	jr	z, Adding4
+	cp	#1B ;401Bh start address of National FS-4000
+	jr	z, Adding4
+Adding2:
+	pop	af   ;Restore AF, restoring initial values for the rest of the MSX operations.
+	jp	(ix) ;Jump as if nothing had happened, waiting for the next attempt.
+Adding3:
+	;Countdown process and abort after x attempts to remove the patch because no suitable MSX model was found to patch.
+	ld	a,(#F4E0) ;Restore counter.
+	dec	a	  ;Subtract 1 from the counter.
+	ld	(#F4E0),a ;Store counter.
+	jr	nz, Adding2 ;If it is not zero, perform another complete cycle.
+	
+	;Apply another patch at address F38F so it is restored to the original call #F398. Nothing happened here. ;-)
+	ld	a,098h
+	ld	(#F390),a
+	ld	a,0F3h
+	ld	(#F391),a
+	pop	af   ;Restore AF, restoring initial values for the rest of the MSX operations.
+	jp	(ix) ;Jump as if nothing had happened because Philips and similar models should not be patched.
+Adding4:
+	;Apply another patch at address F38F so it is restored to the original call #F398. Nothing happened here. ;-)
+	ld	a,098h
+	ld	(#F390),a
+	ld	a,0F3h
+	ld	(#F391),a
+	pop	af ;Restore AF, restoring initial values for the rest of the MSX operations.
+	ret	;Perform the desired RET, leaving everything intact. (It is the RET that returns from the load without executing the internal ROM)
+	ret	;With the RET performed, patch the code back to its original state, leaving the code intact and exiting cleanly.
 	ret
 
-;Check that a device is present and usable.
-;Input:  IDENTIFY DEVICE issued successfully.
-;Output: Cy=0 for device ok, 1 for no device or not usable.
-;        If device ok, 50 first bytes of IDENTIFY device copied to TEMP_WORK.
+	;---- End of internal Boot cancellation. Entirely created by Aquijacks (FlashJacks)
+
+NULL_OTHER_SLOT:;Check whether to prevent execution of another cartridge in slot 2 or higher.
+	
+	call	IDE_ON
+	ld      a,(IDE_FLASHJACKS) ;Read the FlashJacks register.
+	and	00001000b ;Pass through the slot 2 cancellation marker.
+	cp	008h ;Check slot 2 cancellation bit
+	jp	nz,NULL_OTHER_SLOT_EXIT ;No valid marker was detected in the FlashJacks register, so nothing is done for the reset.
+	call	IDE_OFF
+	
+	;Execute cancellation of execution in slots 2 and higher.
+	ld a,#40
+        cp h
+        jp z, NULL_OTHER_SLOT_EXIT
+        ld IX,(0f674h)
+        ld (IX-6),0C3h
+        ld (IX-8),0EBh
+        ld (IX-12),2
+	jp NULL_OTHER_SLOT_EXIT ;Return control.
+
+NULL_OTHER_SLOT_EXIT:
+	call	IDE_OFF
+	ret ;Return control.
+
+
+;--- Subroutines for the INIT procedure
+
+;Check that FLASHJACKS appears at address 457 onward in the SD driver ID.
+;Return zero in A if found, or set the carry flag if not found.
+;Also dump the contents of the SD driver ID into TEMP_WORK, the first 100 bytes.
 
 INIT_CHECK_DEV:
 	ld	hl,IDE_DATA
 	ld	de,TEMP_WORK
-	ld	bc,50*2	;Get the first 50 data words
+	ld	bc,50*2	;Get the first 100 values of the SD driver ID
 	ldir
 
 	ld	a,(IDE_STATUS)		;Check status
 	cp	01111111b		;Usually this means "no device"
-	jr	z,INIT_CHECK_NODEV
-
-	; "At power-up or after reset, the Command Block Registers are initialized 
-	;  to the following values:
-	;
-	; 	REGISTER          VALUE
-	; 	1F1 Error         : 01
-	; 	1F2 Sector Count  : 01
-	; 	1F3 Sector Number : 01
-	; 	1F4 Cylinder Low  : 00
-	; 	1F5 Cylinder High : 00
-	; 	1F6 Drive / Head  : 00"
-	;
-	; Not all devices respect this. One of my CompactFlash cards never have
-	; Sector Count = 01 and Sector Number = 01 after reset.
-	;
-	;	ld	a,(IDE_SECNUM)		;Test if the device is REALLY here
-	;	cp	1
-	;	jr	nz,INIT_CHECK_NODEV
-	;	ld	a,(IDE_SECCNT)
-	;	cp	1
-	;	jr	nz,INIT_CHECK_NODEV
-
-	ld	a,(IDE_CYLOW)		;Test for PATAPI devices
-	cp	20 
-	jr	nz,TEST2_FOR_ATAPI
-	ld	a,(IDE_CYHIGH)
-	cp	235
-	jr	z,INIT_CHECK_NODEV
-TEST2_FOR_ATAPI:
-	ld	a,(IDE_CYLOW)		;Test for SATAPI devices
-	cp	105
-	jr	nz,TEST_FOR_ATA
-	ld	a,(IDE_CYHIGH)
-	cp	150
-	jr	z,INIT_CHECK_NODEV
-
-TEST_FOR_ATA:
-	ld	a,(IDE_CYLOW)		;Test for PATA devices
-	cp	0
-	jr	nz,TEST2_FOR_ATA
-	ld	a,(IDE_CYHIGH)
-	cp	0
-	jr	z,TEST_FOR_LBA
-TEST2_FOR_ATA:
-	ld	a,(IDE_CYLOW)		;Test for SATA devices
-	cp	60
-	jr	nz,INIT_CHECK_NODEV
-	ld	a,(IDE_CYHIGH)
-	cp	195
-	jr	nz,INIT_CHECK_NODEV
+	jp	z,INIT_CHECK_NODEV
 	
-TEST_FOR_LBA:
-	ld      a,(TEMP_WORK+49*2+1)
-	and	2			;LBA supported?
-	jr	z,INIT_CHECK_NODEV
-	xor	a
-	ret
+TEST_FOR_FLASHJACKS:
+	ld	hl,TEMP_WORK+27*2 ;Go to where FLASHJACKS is located
+	ld	b,10 ;Number of comparison bytes.
+	ld	de,DRIVER_N ;Comparison name (FLASHJACKS)
+	
+TESTNAME_LOOP:
+	ld	a,(de)	;Get the location pointed to by the FLASHJACKS constant
+	inc	de	;Increment to the next byte
+	ld	c,a	;Store it in C
+	ld	a,(hl)	;Get the data read from the SD driver ID
+	inc	hl	;Increment to the next byte
+
+	cp	c	;Compare A with C
+	jp	nz,INIT_CHECK_NODEV	;If not equal, return not found.
+	djnz	TESTNAME_LOOP		;If comparison bytes remain, go to the next one
+	xor	a			;Put zero in A
+	ret				;Return control.
 
 INIT_CHECK_NODEV:
-	scf
-	ret
+	scf				;Set the carry flag to 1.
+	ret				;Return control.
 
 
 ;Print a device name.
@@ -1019,9 +1572,9 @@ DEVNAME_LOOP:
 	inc	hl
 	ld	a,(hl)
 	inc	hl
-	call	CHPUT
+	call	DRIVER_CHPUT
 	ld	a,c
-	call	CHPUT
+	call	DRIVER_CHPUT
 	djnz	DEVNAME_LOOP
 
 	ld	de,CRLF_S
@@ -1038,10 +1591,10 @@ DEVNAME_LOOP:
 ;         B = Secondary version number
 ;         C = Revision number
 
-NEXTOR2_DRV_VERSION:
-	ld	a,VER_MAIN
-	ld	b,VER_SEC
-	ld	c,VER_REV
+DRV_VERSION:
+	; Deprecated in Nextor v3; kept harmless for legacy callers.
+	xor	a
+	ld	bc,0
 	ret
 
 
@@ -1078,6 +1631,73 @@ DRV_EXTBIO:
 	ret
 
 
+;-----------------------------------------------------------------------------
+;
+; Direct calls entry points.
+; Calls to addresses 7450h, 7453h, 7456h, 7459h and 745Ch
+; in kernel banks 0 and 3 will be redirected
+; to DIRECT0/1/2/3/4 respectively.
+; Receives all register data from the caller except IX and AF'.
+
+RESERVED_0:
+	ld	a,RESULT_NOT_IMPLEMENTED
+	ret
+
+RESERVED_1:
+	ld	a,RESULT_NOT_IMPLEMENTED
+	ret
+
+RESERVED_2:
+	ld	a,RESULT_NOT_IMPLEMENTED
+	ret
+
+DRV_DIRECT0:
+DRV_DIRECT1:
+DRV_DIRECT2:
+DRV_DIRECT3:
+DRV_DIRECT4:
+	ret
+
+
+;-----------------------------------------------------------------------------
+;
+; Get driver configuration 
+; (bit 2 of driver flags must be set if this routine is implemented)
+;
+; Input:
+;   A = Configuration index
+;   BC, DE, HL = Depends on the configuration
+;
+; Output:
+;   A = 0: Ok
+;       1: Configuration not available for the supplied index
+;   BC, DE, HL = Depends on the configuration
+;
+; * Get number of drives at boot time (for device-based drivers only):
+;   Input:
+;     A = 1
+;     B = 0 for DOS 2 mode, 1 for DOS 1 mode
+;     C: bit 5 set if user is requesting reduced drive count
+;        (by pressing the 5 key)
+;   Output:
+;     B = number of drives
+;
+; * Get default configuration for drive
+;   Input:
+;     A = 2
+;     B = 0 for DOS 2 mode, 1 for DOS 1 mode
+;     C = Relative drive number at boot time
+;   Output:
+;     B = Device index
+;     C = LUN index
+
+DRV_CONFIG:
+	
+	
+	;ld a,1
+	ret
+
+
 ;=====
 ;=====  BEGIN of DEVICE-BASED specific routines
 ;=====
@@ -1106,8 +1726,8 @@ DRV_EXTBIO:
 ;              .SEEK: Seek error
 ;          B = Number of sectors actually read/written
 
-NEXTOR2_DEV_RW:
-
+DEV_RW:
+	
 	push	af
 
 	ld	a,b	;Swap B and C
@@ -1121,14 +1741,14 @@ NEXTOR2_DEV_RW:
 	jp	c,DEV_RW_NODEV
 
 	dec	a
-	jr	z,DEV_RW2
+	jp	z,DEV_RW2
 	ld	a,M_DEV
 DEV_RW2:
 	ld	b,a
 
 	ld	a,c
 	or	a
-	jr	nz,DEV_RW_NO0SEC
+	jp	nz,DEV_RW_NO0SEC
 	pop	af
 	xor	a
 	ld	b,0
@@ -1146,37 +1766,32 @@ DEV_RW_NO0SEC:
 	ld	a,(ix+3)
 	or	M_LBA
 	or	b
-	di ; Se desactivan peticiones de interrupciones para evitar intromisiones.
+	di ;Disable interrupt requests to avoid interference.
 	ld	(IDE_HEAD),a	;IDE_HEAD must be written first,
-	ld	(IDE_HEAD),a	; Se duplica env�o de comando para refrescar sin error la FLASHJACKS.
 	ld	a,(ix)		;or the other IDE_LBAxxx and IDE_SECCNT
 	ld	(IDE_LBALOW),a	;registers will not get a correct value
-	ld	(IDE_LBALOW),a	; Se duplica env�o de comando para refrescar sin error la FLASHJACKS.
 	ld	a,(ix+1)	;(blueMSX issue?)
-	ld	(IDE_LBAMID),a  ; Se duplica env�o de comando para refrescar sin error la FLASHJACKS.
 	ld	(IDE_LBAMID),a
 	ld	a,(ix+2)
-	ld	(IDE_LBAHIGH),a  ; Se duplica env�o de comando para refrescar sin error la FLASHJACKS.
 	ld	(IDE_LBAHIGH),a
 	ld	a,c
-	ld	(IDE_SECCNT),a  ; Se duplica env�o de comando para refrescar sin error la FLASHJACKS.
 	ld	(IDE_SECCNT),a
 	
 	pop	af
-	jr	c,DEV_DO_WR
+	jp	c,DEV_DO_WR ;Jump if this is a write request.
 
 	;---
 	;---  READ
 	;---
 	
 	call	WAIT_CMD_RDY
-	jr	c,DEV_RW_ERR
+	jp	c,DEV_RW_ERR
 	ld	a,20h
 	push	bc	;Save sector count
 	call	DO_IDE
 	pop	bc
-	jr	c,DEV_RW_ERR
-
+	
+	jp	c,DEV_RW_ERR ;Check whether a failure has occurred.
 	call	DEV_RW_FAULT
 	ret	nz
 
@@ -1188,49 +1803,23 @@ DEV_R_GDATA:
 	ld	bc,512
 
 BUCLE_R_GDATA:
-	di ; Se desactivan peticiones de interrupciones para evitar intromisiones.
+	di ;Disable interrupt requests to avoid interference.
 	ld	a,(IDE_STATUS)
 	bit	BSY,a
-	jr	nz,BUCLE_R_GDATA ; Hace una comprobaci�n al inicio y deja paso cuando la FLASHJACKS informa que puede continuar.
-	;ld	a,(hl) ; Esto est� anulado ya que se trata del mismo proceso que hace ldir pero en muchos mas ciclos de reloj. Proceso muy lento.
-	;ld	(de),a
-	;inc	hl
-	;inc	de
-	;dec	bc
-	;ld	a,b
-	;or	c
-	;jr	nz,BUCLE_R_GDATA ; Esto est� anulado ya que se trata del mismo proceso que hace ldir pero en muchos mas ciclos de reloj.
-
-	;ldir ; Volcado ultrar�pido. Usar el del LDI(mas abajo) si se reportan anomal�as (Psycho world en DSK es bueno para probarlo).
-	;CALL	VOLCADO ; Es un ldir un 21% m�s r�pido.
-
-
-BUCLE_R2_GDATA:
-	ldi  ; 8x LDI + 8x nop Hacemos una espera en cada byte de volcado para dejar a la Flashjacks que se refresque a tiempo.(En un manual de asm es un modo r�pido de copia)
-	nop  ; Esto solo es para sistemas ultra r�pidos como el TurboR. Esto hace lectura y ciclo refresco, bucle hasta fin.
-	ldi  ; Es el m�todo m�s estable. (pero no el m�s r�pido. Mas r�pido ldir y a�n m�s call VOLCADO) 
-	nop  ; Los otros funcionan pero cuando hay algo en el otro slot, provoca fallos. (Ejemplo Music module slot 1 y FlashJacks slot 2)
-	ldi
-	nop
-	ldi
-	nop
-	ldi
-	nop
-	ldi
-	nop
-	ldi
-	nop
-	ldi
-	nop
-	jp pe,BUCLE_R2_GDATA
+	jp	nz,BUCLE_R_GDATA ;Check at the start and proceed when FLASHJACKS reports that it can continue.
+	ldi_512 ;It is an LDIR 21% faster.
 
 BUCLE_R_FIN:	
 	ld	a,(IDE_STATUS)
 	bit	BSY,a
-	jr	nz,BUCLE_R_FIN ; Hace una comprobaci�n al final y deja paso cuando la FLASHJACKS informa que puede continuar.
+	jp	nz,BUCLE_R_FIN ;Check at the end and proceed when FLASHJACKS reports that FLASHJACKS can continue.
 	pop	bc
+
 	call	WAIT_IDE
-	
+	jp	c,DEV_RW_ERR ;Check whether a failure has occurred.
+	call	DEV_RW_FAULT
+	ret	nz
+
 	dec	b
 	jp	nz,DEV_R_GDATA
 	call	IDE_OFF
@@ -1243,25 +1832,23 @@ BUCLE_R_FIN:
 
 DEV_DO_WR:
 	call	WAIT_CMD_RDY
-	jr	c,DEV_RW_ERR
+	jp	c,DEV_RW_ERR
 	ld	a,30h
 	push	bc	;Save sector count
 	call	DO_IDE
 	pop	bc
-	jr	c,DEV_RW_ERR
+	jp	c,DEV_RW_ERR ;Check whether a failure has occurred.
 
 	ld	b,c	;Retrieve sector count
 DEV_W_LOOP:
 	push	bc
 	ld	de,IDE_DATA
 	ld	bc,512
-	ldir ; Se deja ldir por mayor estabilidad.
-	;CALL	VOLCADO ; Es un ldir un 21% m�s r�pido.(Por estabilidad se quita)
+	ldi_512 ;It is an LDIR 21% faster.
 	pop	bc
 
 	call	WAIT_IDE
-	jr	c,DEV_RW_ERR
-
+	jp	c,DEV_RW_ERR ;Check whether the ERR bit is set in status.
 	call	DEV_RW_FAULT
 	ret	nz
 	
@@ -1283,21 +1870,21 @@ DEV_RW_ERR:
 	ld	a,b	
 
 	bit	NM,a	;Not ready
-	jr	nz,DEV_R_ERR1
+	jp	z,DEV_R_ERR1
 	ld	a,NRDY
 	ld	b,0
 	ret
 DEV_R_ERR1:
 
 	bit	IDNF,a	;Sector not found
-	jr	nz,DEV_R_ERR2
+	jp	z,DEV_R_ERR2
 	ld	a,RNF
 	ld	b,0
 	ret
 DEV_R_ERR2:
 
 	bit	WP,a	;Write protected
-	jr	nz,DEV_R_ERR3
+	jp	z,DEV_R_ERR3
 	ld	a,WPROT
 	ld	b,0
 	ret
@@ -1373,24 +1960,24 @@ DEV_RW_NODEV:
 ; and if it is too long, the rightmost characters must be
 ; provided, not the leftmost.
 
-NEXTOR2_DEV_INFO:
+DEV_INFO:
 	or	a	;Check device index
-	jr	z,DEV_INFO_ERR1
+	jp	z,DEV_INFO_ERR1
 	cp	3
-	jr	nc,DEV_INFO_ERR1
+	jp	nc,DEV_INFO_ERR1
 
 	call	MY_GWORK
 
 	ld	c,a
 	ld	a,b
 	or	a
-	jr	nz,DEV_INFO_STRING
+	jp	nz,DEV_INFO_STRING
 
 	;--- Obtain basic information
 
 	ld	a,(ix)
 	or	a	;Device available?
-	jr	z,DEV_INFO_ERR1
+	jp	z,DEV_INFO_ERR1
 
 	ld	(hl),1	;One single LUN
 	inc	hl
@@ -1416,7 +2003,7 @@ DEV_INFO_STRING:
 
 	ld	a,c
 	dec	a
-	jr	z,DEV_INFO_STRING2
+	jp	z,DEV_INFO_STRING2
 	ld	a,M_DEV
 
 DEV_INFO_STRING2:
@@ -1424,34 +2011,34 @@ DEV_INFO_STRING2:
 	ld	a,b
 
 	dec	a
-	jr	z,DEV_INFO_ERR2	;Manufacturer name
+	jp	z,DEV_INFO_ERR2	;Manufacturer name
 
 	;--- Device name
 
 	dec	a
-	jr	nz,DEV_STRING_NO1
+	jp	nz,DEV_STRING_NO1
 
 	ld	b,27
 	call	DEV_STING_PREPARE
-	jr	c,DEV_INFO_ERR1
+	jp	c,DEV_INFO_ERR1
 
 	ld	b,20
 DEV_STRING_LOOP:
 	ld	de,(IDE_DATA)
 	ld	a,d
 	cp	33
-	jr	nc,DEVSTRLOOP_1
+	jp	nc,DEVSTRLOOP_1
 	cp	126
-	jr	c,DEVSTRLOOP_1
+	jp	c,DEVSTRLOOP_1
 	ld	a," "
 DEVSTRLOOP_1:
 	ld	(hl),a
 	inc	hl
 	ld	a,e
 	cp	33
-	jr	nc,DEVSTRLOOP_2
+	jp	nc,DEVSTRLOOP_2
 	cp	126
-	jr	c,DEVSTRLOOP_2
+	jp	c,DEVSTRLOOP_2
 	ld	a," "
 DEVSTRLOOP_2:
 	ld	(hl),a
@@ -1467,16 +2054,16 @@ DEV_STRING_NO1:
 	;--- Serial number
 
 	dec	a
-	jr	nz,DEV_INFO_ERR2	;Unknown string
+	jp	nz,DEV_INFO_ERR2	;Unknown string
 
 	ld	b,10
 	call	DEV_STING_PREPARE
-	jr	c,DEV_INFO_ERR1
+	jp	c,DEV_INFO_ERR1
 
 	ld	bc,44
 	add	hl,bc	;Since the string is 20 chars long
 	ld	b,10
-	jr	DEV_STRING_LOOP
+	jp	DEV_STRING_LOOP
 	
 	;--- Termination with error
 
@@ -1550,30 +2137,28 @@ DEV_STRING_SKIP:
 ; Devices not supporting hot-plugging must always return status value 1.
 ; Non removable logical units may return values 0 and 1.
 
-NEXTOR2_DEV_STATUS:
+DEV_STATUS:
 	set	0,b	;So that CHECK_DEV_LUN admits B=0
 
-	call	CHECK_DEV_LUN
+	call	CHECK_DEV_LUN ;Check the logical unit.
 	ld	e,a
 	ld	a,0
 	ret	c
 
-	ld	a,1	;Never changed
+	di;
+	call	IDE_ON	      ;Enable the IDE options
+	ld	a,(IDE_ERROR) ;Request the error codes.
+	ld	b,a
+	call	IDE_OFF	      ;Disable the IDE options.
+	ld	a,b	
+
+	bit	MC,a	;Check detected SD card change
+	jp	z,DEV_No_Cambio
+	ld	a,2	;Respond with drive changed.
 	ret
 
-	;ld	a,1
-	;ret
-
-	ld	a,e
-	cp	2
-	ld	a,1
-	ret	nz
-
-	ld	a,e
-	dec	a	;FOR TESTING:
-	ld	a,2	;Return "Unchanged" for device 1, "Unknown" for device 2
-	ret	z
-	ld	a,3
+DEV_No_Cambio:
+	ld	a,1	;Respond with drive unchanged.
 	ret
 
 
@@ -1608,7 +2193,7 @@ NEXTOR2_DEV_STATUS:
 ;+10 (1): Number of heads (0, if not a hard disk)
 ;+11 (1): Number of sectors per track (0, if not a hard disk)
 
-NEXTOR2_LUN_INFO:
+LUN_INFO:
 	call	CHECK_DEV_LUN
 	jp	c,LUN_INFO_ERROR
 
@@ -1620,19 +2205,19 @@ NEXTOR2_LUN_INFO:
 	pop	ix
 
 	dec	a
-	jr	z,LUN_INFO2
+	jp	z,LUN_INFO2
 	ld	a,M_DEV
 LUN_INFO2:
 	ld	e,a
 	call	WAIT_CMD_RDY	
-	jr	c,LUN_INFO_ERROR
+	jp	c,LUN_INFO_ERROR
 	ld	a,e
 
 	ld	(IDE_HEAD),a
 
 	ld	a,0ECh
 	call	DO_IDE
-	jr	c,LUN_INFO_ERROR
+	jp	c,LUN_INFO_ERROR
 
 	;Set cylinders, heads, and sectors/track
 
@@ -1676,11 +2261,11 @@ LUN_INFO_SKIP2:
 	ld	a,h	;If high word not zero, set zero (info not available)
 	or	l
 	ld	hl,0
-	jr	nz,LUN_INFO_SSIZE
+	jp	nz,LUN_INFO_SSIZE
 
 	ld	a,d
 	or	e
-	jr	nz,LUN_INFO_SSIZE
+	jp	nz,LUN_INFO_SSIZE
 	ld	de,512	;If low word is zero, assume 512 bytes
 LUN_INFO_SSIZE:
 	ld	(ix+1),e
@@ -1688,8 +2273,8 @@ LUN_INFO_SSIZE:
 
 	;Set other parameters
 
-	ld	(ix),0	;Block device
-	ld	(ix+7),0	;Non removable device nor LUN
+	ld	(ix),0	  ;Block device
+	ld	(ix+7), 1 ;bit 0 = 1: It is a hot-plug removable medium (see +7 and its flags in the LUN_INFO description)
 
 	call	IDE_OFF
 	xor	a
@@ -1698,6 +2283,74 @@ LUN_INFO_SSIZE:
 LUN_INFO_ERROR:
 	call	IDE_OFF
 	ld	a,1
+	ret
+
+;-----------------------------------------------------------------------------
+;
+; Physical format a device
+;
+;Input:   A = Device index, 1 to 7
+;         B = Logical unit number, 1 to 7
+;         C = Format choice, 0 to return choice string
+;Output:
+;        When C=0 at input:
+;        A = 0: Ok, address of choice string returned
+;            .IFORM: Invalid device or logical unit number,
+;                    or device not formattable
+;        HL = Address of format choice string (in bank 0 or 3),
+;             only if A=0 returned.
+;             Zero, if only one choice is available.
+;
+;        When C<>0 at input:
+;        A = 0: Ok, device formatted
+;            Other: error code, same as DEV_RW plus:
+;            .IPARM: Invalid format choice
+;            .IFORM: Invalid device or logical unit number,
+;                    or device not formattable
+;        B = Media ID if the device is a floppy disk, zero otherwise
+;            (only if A=0 is returned)
+;
+; Media IDs are:
+; F0h: 3.5" Double Sided, 80 tracks per side, 18 sectors per track (1.44MB)
+; F8h: 3.5" Single sided, 80 tracks per side, 9 sectors per track (360K)
+; F9h: 3.5" Double sided, 80 tracks per side, 9 sectors per track (720K)
+; FAh: 5.25" Single sided, 80 tracks per side, 8 sectors per track (320K)
+; FBh: 3.5" Double sided, 80 tracks per side, 8 sectors per track (640K)
+; FCh: 5.25" Single sided, 40 tracks per side, 9 sectors per track (180K)
+; FDh: 5.25" Double sided, 40 tracks per side, 9 sectors per track (360K)
+; FEh: 5.25" Single sided, 40 tracks per side, 8 sectors per track (160K)
+; FFh: 5.25" Double sided, 40 tracks per side, 8 sectors per track (320K)
+
+DEV_FORMAT:
+	ld	a,IFORM
+	ret
+
+
+;-----------------------------------------------------------------------------
+;
+; Execute direct command on a device
+;
+;Input:    A = Device number, 1 to 7
+;          B = Logical unit number, 1 to 7 (if applicable)
+;          HL = Address of input buffer
+;          DE = Address of output buffer, 0 if not necessary
+;Output:   Output buffer appropriately filled (if applicable)
+;          A = Error code:
+;              0: Ok
+;              1: Invalid device number or logical unit number,
+;                 or device not ready
+;              2: Invalid or unknown command
+;              3: Insufficient output buffer space
+;              4-15: Reserved
+;              16-255: Device specific error codes
+;
+; The first two bytes of the input and output buffers must contain the size
+; of the buffer, not incuding the size bytes themselves.
+; For example, if 16 bytes are needed for a buffer, then 18 bytes must
+; be allocated, and the first two bytes of the buffer must be 16, 0.
+
+DEV_CMD:
+	ld	a,2
 	ret
 
 
@@ -1729,8 +2382,8 @@ IDE_OFF:
 ;-----------------------------------------------------------------------------
 ;
 ; Wait the BSY flag to clear and RDY flag to be set
-; if we wait for more than 30s, send a soft reset to IDE BUS
-; if the soft reset didn't work after 30s return with error
+; if we wait for more than 5s, send a soft reset to IDE BUS
+; if the soft reset didn't work after 5s return with error
 ;
 ; Input:  Nothing
 ; Output: Cy=1 if timeout after soft reset 
@@ -1739,19 +2392,19 @@ IDE_OFF:
 WAIT_CMD_RDY:
 	push	de
 	push	bc
-	ld	de,8142		;Limit the wait to 30s
+	ld	de,1357		;Limit the wait to 5s
 WAIT_RDY1:
 	ld	b,255
 WAIT_RDY2:
 	ld	a,(IDE_STATUS)
 	and	M_BSY+M_DRDY
 	cp	M_DRDY
-	jr	z,WAIT_RDY_END	;Wait for BSY to clear and DRDY to set		
+	jp	z,WAIT_RDY_END	;Wait for BSY to clear and DRDY to set		
 	djnz	WAIT_RDY2	;End of WAIT_RDY2 loop
 	dec	de
 	ld	a,d
 	or	e
-	jr	nz,WAIT_RDY1	;End of WAIT_RDY1 loop
+	jp	nz,WAIT_RDY1	;End of WAIT_RDY1 loop
 	scf
 WAIT_RDY_END:
 	pop	bc
@@ -1767,20 +2420,19 @@ WAIT_RDY_END:
 ; Output: Cy=1 if ERR bit in status register set
 
 DO_IDE: di
-	ld	(IDE_CMD),a ; Se duplica env�o de comando para refrescar sin error la FLASHJACKS.
-	ld	(IDE_CMD),a 
+	ld	(IDE_CMD),a ;Send a command.
 
 WAIT_IDE:
 	nop	; Wait 50us
 	nop	; Wait 50us
 	ld	a,(IDE_STATUS)
 	bit	DRQ,a
-	jr	nz,IDE_END
+	jp	nz,IDE_END
 	bit	BSY,a
-	jr	nz,WAIT_IDE
+	jp	nz,WAIT_IDE
 
 IDE_END:
-	rrca
+	rrca	;If status bit 0 is 1, send it to Cy, which is error 0, IDE_Status ERR bit
 	ret
 
 ;-----------------------------------------------------------------------------
@@ -1794,9 +2446,15 @@ CHECK_ESC:
 	and	11110000b
 	or	b
 	out	(0AAh),a
-	in	a,(0A9h)	
+	;Read from standard port A9h
+	in      a, (0A9h)       ;First read (standard port)
+	ld      c, a            ; Guardar en C
+	;Read from alternative port DEh
+	in      a, (0DEh)       ;Second read (alternative port)
+	;Combine both reads with AND
+	and     c               ; A = A9h AND DEh	
 	bit	2,a
-	jr	nz,CHECK_ESC_END
+	jp	nz,CHECK_ESC_END
 	scf
 CHECK_ESC_END:
 	ret
@@ -1810,17 +2468,15 @@ PRINT:
 	ld	a,(de)
 	or	a
 	ret	z
-	call	CHPUT
+	call	DRIVER_CHPUT
 	inc	de
-	jr	PRINT
+	jp	PRINT
 
 
 ;-----------------------------------------------------------------------------
 ;
 ; Obtain the work area address for the driver
-; Input: A=0 or 1 to obtain the page-3 work area base
-;        A=2 to obtain the slave-device entry (base + 4)
-; Output: IX = selected work area pointer
+; Input: A=1  to obtain the work area for the master, 2 for the slave
 ; Preserves A
 
 MY_GWORK:
@@ -1831,18 +2487,12 @@ MY_GWORK:
 	LD IX,GWORK
 	call CALBNK
 	pop	af
-	push	de
-	ld	e,(ix)		;DE = pointer to the page-3 work area
-	ld	d,(ix+1)
-	push	de
-	pop	ix		;IX = page-3 work area base
-	pop	de
-	cp	2
-	ret	nz		;A=0 or A=1: return base
+	cp	1
+	ret	z
 	inc	ix
 	inc	ix
 	inc	ix
-	inc	ix		;A=2: return base + 4
+	inc	ix
 	ret
 
 
@@ -1884,15 +2534,6 @@ CHECK_DEV_LUN:
 	or	a
 	ret
 
-;-----------------------------------------------------------------------------
-;
-; Hace un volcado de 512 bytes.
-VOLCADO:
-	REPT 512 ; esto es un 21% m�s r�pido que el ldi
-	ldi
-	ENDM
-	ret
-
 ;----------------------------------------------------------------------------------
 ;Turn On Turbo CPU: MSX CIEL, Panasonic 2+,Panasonic Turbo R, special TurboCPU kits
 ;
@@ -1912,10 +2553,10 @@ _TURBO3:
 
 _CIEL1:	ld	b,3
 _CIEL2: ld	a,(hl)
-	ld_	ixh,a
+	ld	ixh,a
 	ld	a,(de)
-	cp_	ixh
-	jr	nz,NOTCIEL
+	cp	ixh
+	jp	nz,NOTCIEL
 	inc	hl
 	inc	de
 	djnz	_CIEL2
@@ -1923,7 +2564,7 @@ _CIEL2: ld	a,(hl)
 	dec	c
 	ld	a,c
 	or	a
-	jr	nz,_CIEL2
+	jp	nz,_CIEL2
 	call	CHGTURCIEL
 	db	1	; Padding to make the CIELSIGN inert
 CIELSIGN:	DEFB	0A7h,0FAh,093h,013h,0DBh,0B6h
@@ -1937,17 +2578,17 @@ NOTCIEL:
 	IN	A,(040H)	;read the value you have just written
 	CPL			;complement all bits of the value
 	CP	8		;if it does not match the value you originally wrote,
-	JR	NZ,Not_WX	;it is not a WX/WSX/FX.
+	JP	NZ,Not_WX	;it is not a WX/WSX/FX.
 	XOR	A		;write 0 to I/O port 41h
 	OUT	(041H),A	;and the mode changes to high-speed clock
 	
 		
-	jr	end_turbo
+	jp	end_turbo
 
 Not_WX:  ld	a,(0180h)	;Turbo R or Turbo CPU kits with JUMP in 0180h
 	cp	0c3h
 		;no_turbo
-	jr	nz,end_turbo
+	jp	nz,end_turbo
 	ld	a,081h		;ROM Mode... for DRAM Mode-> 82h
 	call	0180h
 
@@ -1961,15 +2602,25 @@ end_turbo:
 ; Strings
 ;=======================
 
+V3_STR_DRIVER_NAME:
+	db	"FlashJacks Nextor 3 driver",0
+V3_STR_DRIVER_AUTHOR:
+	db	"Aquijacks / Konamiman",0
+V3_STR_HARDWARE_NAME:
+	db	"FlashJacks IDE",0
+V3_STR_HARDWARE_AUTHOR:
+	db	"Aquijacks",0
+
 INFO_S:
-	db	"FLASHJACKS IDE driver v"
+	db	"FLASHJACKS SD driver v"
 	db	VER_MAIN+"0",".",VER_SEC+"0",".",VER_REV+"0",13,10
 	db	"(c) Konamiman  2009",13,10
-	db	"(c) Aquijacks  2018",13,10,13,10,0
+	db	"(c) Aquijacks  2026",13,10,13,10,0
 
 SEARCH_S:
 	db	"Buscando: ",0
-
+DRIVER_N:
+	db	"LFSAJHCASK",0 ;Compare this name at startup. Odd bytes by pairs.
 NODEVS_S:
 	db	"No encontrada",13,10,0
 MASTER_S:
@@ -1990,7 +2641,6 @@ M_OCM:
 	db	"OCM",13,10,13,10,0
 M_NDTC:
 	db	"No detectado",13,10,13,10,0
-
 
 ;-----------------------------------------------------------------------------
 ;
