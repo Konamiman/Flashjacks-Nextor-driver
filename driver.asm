@@ -123,45 +123,45 @@ MSXVER	equ	002Dh
 
 ;-----------------------------------------------------------------------------
 ;
-;Keyboard interception variables.
+; Keyboard interception variables.
 
-;CRITICAL MEMORY ADDRESSES:
-NEWKEY      equ  0FBE5h  ;Current keyboard matrix (11 bytes)
-OLDKEY      equ  0FBF0h  ;Previous keyboard matrix (11 bytes - KEYBUF in BIOS)
-KEYBUF      equ  0FBF0h  ;Keyboard circular buffer (40 bytes)
-PUTPNT      equ  0F3F8h  ;Buffer write pointer
-GETPNT      equ  0F3FAh  ;Buffer read pointer
-COUNTER_REP equ  0FD9Eh  ;Keyboard repeat counter. Stored in RAM. It is the last byte of H.KEYI. I don't think it is ever used.
-REPCNT      equ  0F3F7h  ;Interval until keyboard repeat (BIOS)
+; CRITICAL MEMORY ADDRESSES:
+NEWKEY      equ  0FBE5h  ; Current keyboard matrix (11 bytes)
+OLDKEY      equ  0FBF0h  ; Previous keyboard matrix (11 bytes - KEYBUF in BIOS)
+KEYBUF      equ  0FBF0h  ; Circular keyboard buffer (40 bytes)
+PUTPNT      equ  0F3F8h  ; Buffer write pointer
+GETPNT      equ  0F3FAh  ; Buffer read pointer
+COUNTER_REP equ  0FD9Eh  ; Keyboard repeat counter. Stored in RAM. It's the last byte of H.KEYI. I don't think it's ever used.
+REPCNT      equ  0F3F7h  ; Interval until repeat (BIOS)
 
-;CONFIGURATION CONSTANTS
-DELAY_INICIAL   equ  18  ;Initial delay before repetition (300ms @ 60Hz)
-INTERVALO_REP   equ  2   ;Interval between repetitions (33ms @ 60Hz)
+; CONFIGURATION CONSTANTS
+DELAY_INICIAL   equ  18  ; Initial delay before repeat (300ms @ 60Hz)
+INTERVALO_REP   equ  2   ; Interval between repeats (33ms @ 60Hz)
 
-;Bit masks to identify modifier keys
-;Row 6: F3,F2,F1,CODE,CAPS,GRAPH,CTRL,SHIFT (bits 0-4)
-MASK_MODIFIERS  equ  00010111b  ;Bits 0-4 are modifier keys
-
-; ============================================================================
-;MSX SYSTEM CONSTANTS FOR SHADOWING
-; ============================================================================
-PSLOT_PORT      EQU     0A8H    ;Main Slot Selection Register port
-ENASLT          EQU     0024H   ;BIOS: Enable slot on a specific page
-EXPTBL          EQU     0FCC1H  ;Table of expanded slots (8 bytes)
-SLTTBL          EQU     0FCC5H  ;Secondary slot table (4 bytes)
-SLOT_PRIMARY    EQU     00H     ;Slot 0 (BIOS ROM)
-SLOT_RAM        EQU     03H     ;Slot 3 (Internal RAM - MSX assumption)
-START_ADDRESS   EQU     0000H   ;BIOS start address (0000h)
-BIOS_SIZE       EQU     4000H   ;Complete 16 KB BIOS (16384 bytes)
+; Bit masks to identify modifier keys
+; Row 6: F3,F2,F1,CODE,CAPS,GRAPH,CTRL,SHIFT (bits 0-4)
+MASK_MODIFIERS  equ  00010111b  ; Bits 0-4 are modifiers
 
 ; ============================================================================
-;RAM VARIABLES FOR BIOS SHADOWING (0F5D0H onwards)
+; MSX SYSTEM CONSTANTS FOR SHADOWING
 ; ============================================================================
-SHADOW_SAVED_SLOTS  EQU 0F5D0H  ;1 byte: Original A8h port configuration
-SHADOW_BIOS_SLOT    EQU 0F5D1H  ;1 byte: BIOS ROM slot ID
-SHADOW_RAM_SLOT     EQU 0F5D2H  ;1 byte: Destination RAM slot ID
-SHADOW_SUCCESS      EQU 0F5D3H  ;1 byte: Success flag (1=OK, 0=Error)
-SHADOW_PATCH_COUNT  EQU 0F5D4H  ;1 byte: Number of patches applied (debug)
+PSLOT_PORT      EQU     0A8H    ; Primary slot selection register port
+ENASLT          EQU     0024H   ; BIOS: enable slot in a specific page
+EXPTBL          EQU     0FCC1H  ; Expanded slots table (8 bytes)
+SLTTBL          EQU     0FCC5H  ; Secondary slots table (4 bytes)
+SLOT_PRIMARY    EQU     00H     ; Slot 0 (BIOS ROM)
+SLOT_RAM        EQU     03H     ; Slot 3 (Internal RAM - MSX assumption)
+START_ADDRESS   EQU     0000H   ; Start of BIOS (0000h)
+BIOS_SIZE       EQU     4000H   ; Full 16 KB of BIOS (16384 bytes)
+
+; ============================================================================
+; RAM VARIABLES FOR SHADOW BIOS (from 0F5D0H onward)
+; ============================================================================
+SHADOW_SAVED_SLOTS  EQU 0F5D0H  ; 1 byte: original configuration of port A8h
+SHADOW_BIOS_SLOT    EQU 0F5D1H  ; 1 byte: slot ID of the BIOS ROM
+SHADOW_RAM_SLOT     EQU 0F5D2H  ; 1 byte: slot ID of the destination RAM
+SHADOW_SUCCESS      EQU 0F5D3H  ; 1 byte: success flag (1=OK, 0=Error)
+SHADOW_PATCH_COUNT  EQU 0F5D4H  ; 1 byte: counter of applied patches (debug)
 
 
 ;-----------------------------------------------------------------------------
@@ -169,8 +169,8 @@ SHADOW_PATCH_COUNT  EQU 0F5D4H  ;1 byte: Number of patches applied (debug)
 
 ;-----------------------------------------------------------------------------
 ;
-;Sends the HL port to the DE output port and increments both pointers.
-;Memory copy.
+; Copies from HL to DE and increments both pointers.
+; Memory copy.
 ldi_1 macro
 	;ld a,(hl)
 	;ld (de),a
@@ -218,7 +218,7 @@ endm
 
 ;-----------------------------------------------------------------------------
 ;
-;End of macros.
+; End of macros.
 ;
 ;------------------------------------------------------------------------------
 
@@ -651,7 +651,6 @@ DO_DEVQ_GET_AVAILABILITY:
 V3_DEVQ_READ_MEDIA_STATUS:
 	call	V3_CHECK_DEVICE
 	jr	c,V3_DEVQ_INVALID
-	di
 	call	IDE_ON
 	ld	a,(IDE_ERROR)
 	ld	b,a
@@ -663,23 +662,19 @@ V3_DEVQ_READ_MEDIA_STATUS:
 	jr	nz,V3_MEDIA_CHANGED
 	ld	b,1
 	xor	a
-	ei
 	ret
 V3_MEDIA_ABSENT:
 	ld	b,0
 	xor	a
-	ei
 	ret
 V3_MEDIA_CHANGED:
 	ld	b,2
 	xor	a
-	ei
 	ret
 
 V3_DEVQ_READ_MEDIA_AVAILABILITY:
 	call	V3_CHECK_DEVICE
 	jr	c,V3_DEVQ_INVALID
-	di
 	call	IDE_ON
 	ld	a,(IDE_ERROR)
 	ld	b,a
@@ -689,12 +684,10 @@ V3_DEVQ_READ_MEDIA_AVAILABILITY:
 	jr	nz,V3_AVAIL_ABSENT
 	ld	b,1
 	xor	a
-	ei
 	ret
 V3_AVAIL_ABSENT:
 	ld	b,0
 	xor	a
-	ei
 	ret
 
 ; FlashJacks is not a floppy device and has no format/motor API.
@@ -756,102 +749,102 @@ V3_RW_BAD_DEVICE:
 ; (at 50 or 60Hz), but only if DRV_INIT returns Cy=1 on its first execution.
 
 ; ============================================================================
-;MAIN TIMER INTERRUPT ROUTINE
-;Executed 50/60 times per second
+; MAIN TIMER INTERRUPT ROUTINE
+; Runs 50/60 times per second
 ; ============================================================================
 DRV_TIMI:
         push af
         push bc
         push hl
         push de
-        exx                     ; Preservar registros shadow
-        ex   af,af'             ; Preservar AF'
-        di                      ;Critical section
+        exx                     ; Preserve shadow registers
+        ex   af,af'             ; Preserve AF'
+        di                      ; Critical section
 
         ; ====================================================================
-        ;PHASE 1: FAST KEYBOARD MATRIX SCAN FROM ALTERNATIVE PORT
+        ; PHASE 1: FAST KEYBOARD MATRIX SCAN FROM ALTERNATE PORT
         ; ====================================================================
-        ;This scan reads from port 0DEh (FlashJacks alternative port)
-        ;and stores it in NEWKEY (FBE5h) for BIOS compatibility
+        ; This scan reads from port 0DEh (FlashJacks alternate port)
+        ; and stores into NEWKEY (FBE5h) for BIOS compatibility
         
-        in   a,(0AAh)           ;Prepare PPI register C
-        and  0F0h               ;Clear bits 0-3 (row selection)
-        ld   c,a                ;C = base for row selection
-        ld   b,0Bh              ; 11 filas (0-10)
-        ld   hl,NEWKEY          ;Destination: NEWKEY area (BIOS compatible)
+        in   a,(0AAh)           ; Prepare PPI register C
+        and  0F0h               ; Clear bits 0-3 (row selection)
+        ld   c,a                ; C = base for row selection
+        ld   b,0Bh              ; 11 rows (0-10)
+        ld   hl,NEWKEY          ; Destination: NEWKEY area (BIOS compatible)
         xor  a
-        ld   d,a                ;D=0: "no keys" flag
+        ld   d,a                ; D=0: "no keys" flag
 
 scan_loop:
         ld   a,c
-        out  (0AAh),a           ;Select row in PPI
-        in   a,(0DEh)           ;Read from FlashJacks ALTERNATIVE port
-        ld   (hl),a             ; Almacenar en NEWKEY
+        out  (0AAh),a           ; Select row on PPI
+        in   a,(0DEh)           ; Read from ALTERNATE FlashJacks port
+        ld   (hl),a             ; Store into NEWKEY
         
-        cp   0FFh               ;All keys released?
-        jr   z,scan_next        ;Yes, continue
-        ld   d,01h              ;Mark that keys are pressed
+        cp   0FFh               ; All keys unpressed?
+        jr   z,scan_next        ; Yes, continue
+        ld   d,01h              ; Mark that keys are pressed
         
 scan_next:
-        inc  c                  ;Next row
-        inc  hl                 ;Next NEWKEY byte
-        djnz scan_loop          ; Repetir para 11 filas
+        inc  c                  ; Next row
+        inc  hl                 ; Next NEWKEY byte
+        djnz scan_loop          ; Repeat for 11 rows
 
         ; ====================================================================
-        ;PHASE 2: INTELLIGENT CHANGE ANALYSIS
+        ; PHASE 2: INTELLIGENT CHANGE ANALYSIS
         ; ====================================================================
         ld   a,d
         or   a
-        jr   nz,hay_tecla       ;Keys are pressed
+        jr   nz,hay_tecla       ; Keys are pressed
         
         ; --------------------------------------------------------------------
-        ;NO KEYS PRESSED - Cleanup and reset
+        ; NO KEYS PRESSED - Cleanup and reset
         ; --------------------------------------------------------------------
 sin_tecla:
         xor  a
-        ld   (COUNTER_REP),a    ;Reset repetition counter
+        ld   (COUNTER_REP),a    ; Reset repeat counter
         
-        ;Clear keyboard buffer (40 bytes from FBF0h)
+        ; Clear keyboard buffer (40 bytes from FBF0h)
         ld   hl,KEYBUF
         ld   de,KEYBUF+1
         ld   bc,39
         ld   (hl),0
         ldir
         
-        ; Resetear punteros
+        ; Reset pointers
         ld   hl,KEYBUF
-        ld   (PUTPNT),hl        ;PUTPNT = buffer start
-        ld   (GETPNT),hl        ;GETPNT = buffer start
+        ld   (PUTPNT),hl        ; PUTPNT = buffer start
+        ld   (GETPNT),hl        ; GETPNT = buffer start
         
         jr   fin_timi
 
         ; --------------------------------------------------------------------
-        ;KEYS PRESSED - Detailed analysis
+        ; KEYS ARE PRESSED - Detailed analysis
         ; --------------------------------------------------------------------
 hay_tecla:
-        ;First: Is it a SINGLE modifier key?
+        ; First: is it a modifier key ALONE?
         call CHECK_ONLY_MODIFIERS
         jr   c,tecla_modificadora_sola
         
-        ;It is a normal key or key + modifier
-        ;Manage repetition counter
+        ; It is a normal key, or a key + modifier
+        ; Manage repeat counter
         ld   a,(COUNTER_REP)
         inc  a
-        cp   2                ; Evitar overflow
+        cp   2                ; Avoid overflow
         jr   nz,no_overflow
         ld   a,2
 no_overflow:
         ld   (COUNTER_REP),a
         
-        ;Decide whether to execute BIOS scan
-        cp   1                  ;First key press?
+        ; Decide whether to run the BIOS scan
+        cp   1                  ; First keypress?
         jr   z,ejecutar_scan
         
-        cp   DELAY_INICIAL+1    ;Before initial delay?
-        jr   c,fin_timi         ;Yes, do nothing yet
-        jr   z,ejecutar_scan    ;Just after the delay, execute
+        cp   DELAY_INICIAL+1    ; Before the initial delay?
+        jr   c,fin_timi         ; Yes, do nothing yet
+        jr   z,ejecutar_scan    ; Right after the delay, run it
         
-        ;Calculate whether repetition is due (INTERVALO_REP modulo)
+        ; Compute whether a repeat is due (modulo INTERVALO_REP)
         sub  DELAY_INICIAL+1
 mod_loop:
         cp   INTERVALO_REP
@@ -860,39 +853,39 @@ mod_loop:
         jr   mod_loop
 mod_check_zero:
         or   a
-        jr   nz,fin_timi        ;Not due yet
+        jr   nz,fin_timi        ; Not due yet
 
 ejecutar_scan:
-        ;Call BIOS routine for full processing
-        ei                      ;Enable interrupts for BIOS
-        call 0D26h              ;BIOS keyboard decoding routine
+        ; Call the BIOS routine for full processing
+        ei                      ; Enable interrupts for BIOS
+        call 0D26h              ; BIOS keyboard decoding routine
         jr   fin_timi
 
         ; --------------------------------------------------------------------
-        ;SINGLE MODIFIER KEY - Do not generate repetition
+        ; MODIFIER KEY ALONE - Do not generate repeat
         ; --------------------------------------------------------------------
 tecla_modificadora_sola:
-        ;SINGLE modifier keys must not:
-        ;- Increment repetition counter
-        ;- Generate characters in the buffer
-        ;- Call the decoding routine
+        ; Modifier keys ALONE must NOT:
+        ; - Increment the repeat counter
+        ; - Generate characters in the buffer
+        ; - Call the decoding routine
         
-        ;BUT they must:
-        ;- Update NEWKEY so other routines can see them
-        ;- Allow them to be read with SNSMAT
+        ; BUT they SHOULD:
+        ; - Update NEWKEY so other routines can see them
+        ; - Be readable via SNSMAT
         
         xor  a
-        ld   (COUNTER_REP),a    ;Reset counter (no repetition)
-        ;Do not call 0D26h
+        ld   (COUNTER_REP),a    ; Reset counter (no repeat)
+        ; Do not call 0D26h
         jr   fin_timi
 
         ; ====================================================================
-        ;PHASE 3: FINALIZATION
+        ; PHASE 3: FINALIZATION
         ; ====================================================================
 fin_timi:
-        ei                      ;Re-enable interrupts
-        ex   af,af'             ; Restaurar AF'
-        exx                     ; Restaurar registros shadow
+        ei                      ; Re-enable interrupts
+        ex   af,af'             ; Restore AF'
+        exx                     ; Restore shadow registers
         pop  de
         pop  hl
         pop  bc
@@ -900,36 +893,36 @@ fin_timi:
         ret
 
 ; ============================================================================
-; SUBRUTINA: CHECK_ONLY_MODIFIERS
-;Check whether ONLY modifier keys are pressed (no normal keys)
+; SUBROUTINE: CHECK_ONLY_MODIFIERS
+; Checks whether ONLY modifier keys are pressed (no normal keys)
 ; 
-; Salida:
-;Cy = 1: Modifiers only (or no keys)
-;Cy = 0: Normal keys present (with or without modifiers)
+; Output:
+;   Cy = 1: Only modifiers (or none)
+;   Cy = 0: There are normal keys (with or without modifiers)
 ; ============================================================================
 CHECK_ONLY_MODIFIERS:
         push hl
         push bc
         
-        ;Check rows 0-5 (normal keys)
+        ; Check rows 0-5 (normal keys)
         ld   hl,NEWKEY
-        ld   b,6                ; Primeras 6 filas
+        ld   b,6                ; First 6 rows
 check_normal_loop:
         ld   a,(hl)
-        cp   0FFh               ;Any key pressed in this row?
-        jr   nz,found_normal    ;Yes, normal key present
+        cp   0FFh               ; Any key pressed in this row?
+        jr   nz,found_normal    ; Yes, there is a normal key
         inc  hl
         djnz check_normal_loop
         
-        ;Check row 6 (modifiers) - bits 5-7 only
-        ;Bits 0-4 are modifiers, bits 5-7 are F1-F3
+        ; Check row 6 (modifiers) - bits 5-7 only
+        ; Bits 0-4 are modifiers, bits 5-7 are F1-F3
         ld   a,(hl)             ; NEWKEY+6
-        or   MASK_MODIFIERS     ;Mask modifiers (bits 0-4)
-        cp   0FFh               ;Only modifiers or nothing?
-        jr   nz,found_normal    ;Bits 5-7 active = F1-F3 = normal key
+        or   MASK_MODIFIERS     ; Mask out modifiers (bits 0-4)
+        cp   0FFh               ; Only modifiers, or nothing?
+        jr   nz,found_normal    ; Bits 5-7 active = F1-F3 = normal key
         
         inc  hl
-        ;Check rows 7-10 (special and numeric keys)
+        ; Check rows 7-10 (special and numeric keys)
         ld   b,4
 check_special_loop:
         ld   a,(hl)
@@ -938,14 +931,14 @@ check_special_loop:
         inc  hl
         djnz check_special_loop
         
-        ;Only modifiers (or no keys)
+        ; Only modifiers (or no key at all)
         pop  bc
         pop  hl
         scf                     ; Cy = 1
         ret
 
 found_normal:
-        ;At least one normal key
+        ; There is at least one normal key
         pop  bc
         pop  hl
         or   a                  ; Cy = 0
@@ -994,28 +987,28 @@ DRV_INIT:
 	or	a
 	jr	nz,DRV_INIT2
 	
-	;First check whether to disable H.TIMI
+	;Check first whether to disable H.TIMI
 	push	af
 	call	IDE_ON 
-	ld      a,(IDE_FLASHJACKS) ;Read the FlashJacks register. (Count 1 for possible double reset)
-	and	00100000b ;Keep only the SOFTPORT bit
-	cp	020h ;Check bit marker.
-	jp	z,FORINIT2 ;If SOFTPORT is detected as 1, do not disable H.TIMI
-	;First execution: do not request timer hook
+	ld      a,(IDE_FLASHJACKS) ; Fetch the Flashjacks register. (Counts 1 for possible double reset)
+	and	00100000b ; Keep only the SOFTPORT bit
+	cp	020h ;	Check bit flag.
+	jp	z,FORINIT2 ; If 1 is detected in SOFTPORT, does not disable H.TIMI
+	; First run: do not request timer hook
 	call	IDE_OFF	
 	pop	af
-	or	a		;← Cy=0: DISABLE DRV_TIMI for keyboard hook
+	or	a		; ← Cy=0: DISABLES DRV_TIMI for keyboard hook
 	ld	hl,WRKAREA_SIZE	; 8-byte legacy area + 65-byte v3 string scratch
 	ld	a,2		; 2 drives
 	ret	
 		
 FORINIT2:
-	;First execution: request timer hook
+	; First run: request timer hook
 	call	IDE_OFF	
 	pop	af
 	ld	hl,WRKAREA_SIZE	; 8-byte legacy area + 65-byte v3 string scratch
 	ld	a,2		; 2 drives
-	scf			;← Cy=1: ENABLE DRV_TIMI for keyboard hook
+	scf			; ← Cy=1: ENABLES DRV_TIMI for keyboard hook
 	ret	
 	
 DRV_INIT2:
@@ -1023,61 +1016,61 @@ DRV_INIT2:
 	;xor a
 	;ld (TESTADD),a
 
-	;--- Clear the screen. On MSX1 this must be done explicitly because it is not implemented by default.
+	;--- Clear the screen. On MSX1 this must be done explicitly since it is not implemented by default.
 	
-	push	af ;Save the startup variables.
+	push	af ; Save the startup variables.
 	push	bc
 	push	hl
 	
-	;-- Screen clearing is skipped in Nextor >= 3.0 so the Nextor options can be seen.
-		;bit	0,a ;Clear the Z flag
-		;xor	a ;Clear A
+	;-- Screen clearing is skipped on Nextor >= 3.0 so the Nextor options remain visible.
+		;bit	0,a ; Clear the Z flag
+		;xor	a ; Clear a
 		;call	CLS
-		;--- This screen-clearing method is better. Provided by Victor.
-		;ld	a,40 ; 40 columnas
+		;--- This clearing method is better. Contributed by Victor.
+		;ld	a,40 ; 40 columns
 		;ld	(0F3AEh),a
 		;xor	a
 		;call	005Fh ; Screen 0
 
-	;--- Check the double-reset bit and execute it if it is on.
+	;--- Check the double-reset bit and run it if it is on.
 	call	IDE_ON
-	ld      a,(IDE_FLASHJACKS) ;Read the FlashJacks register. (Count 2 for possible double reset)
-	and	00000100b ;Clear the freq and second-slot bits, leaving only the option marker bits.
-	cp	004h ;Check reset bit marker
-	jp	nz,CONTPRG ;No valid marker was detected in the FlashJacks register, so nothing is done for the reset.
+	ld      a,(IDE_FLASHJACKS) ; Fetch the Flashjacks register.(Counts 2 for possible double reset)  
+	and	00000100b ; Clear the freq and second-slot bits, keeping only the option-flag bits.
+	cp	004h ;	Check reset flag bit
+	jp	nz,CONTPRG ; No correct flag was detected in the Flashjacks register, so nothing from the reset is executed.
 	call	IDE_OFF
-	pop	hl ;Restore the startup variables.
+	pop	hl ; Restore the startup variables.
 	pop	bc 
 	pop	af
-	rst	0 ;Force a reset. From here a soft reset is performed and the program does not continue.
+	rst	0 ; Force a reset. From here on it does a soft reset and does not continue with the program.
 
 CONTPRG:
 	call	IDE_OFF
 
 	;----------------------------------------------
-	;Check F4 and F5 keys (VDP FREQ and force TURBOCPU)
+	;Check the F4 and F5 keys (VDP FREQ and force TURBOCPU)
 	push	af
 	push	hl
 	push	de
 	push	bc
 
-	;Check pressed key
+	; Compare pressed key
 	ld	b,7 ;row 7 	RET 	SELECT 	BS 	STOP 	TAB 	ESC 	F5 	F4
 	in	a,(0AAh)
 	and	11110000b
 	or	b
 	out	(0AAh),a
-	;Read from standard port A9h
-	in      a, (0A9h)       ;First read (standard port)
-	ld      c, a            ; Guardar en C
-	;Read from alternative port DEh
-	in      a, (0DEh)       ;Second read (alternative port)
-	;Combine both reads with AND
+	; Read from standard port A9h
+	in      a, (0A9h)       ; First read (standard port)
+	ld      c, a            ; Store in C
+	; Read from alternate port DEh
+	in      a, (0DEh)       ; Second read (alternate port)
+	; Combine both reads with AND
 	and     c               ; A = A9h AND DEh	
-	bit	0,a ;F4 -- If the key is pressed, turbo goes to the CPU turbo activation routine.
-	jp	nz,Fin_ini ;Skip if the turbo key is not pressed.
+	bit	0,a ;F4 -- If the turbo key is pressed, jumps to the turbo activation routine.
+	jp	nz,Fin_ini ; Jump if the turbo key is not pressed.
 	push	af
-	call	putTURBO_CPU ;Execute the CPU turbo.
+	call	putTURBO_CPU ; Run turbo CPU.
 	pop	af
 Fin_ini:pop	bc
 	pop	de
@@ -1085,29 +1078,29 @@ Fin_ini:pop	bc
 	pop	af
 	
 	
-	;-- Add an Enter to separate the Nextor >= 3.0 information from the FlashJacks information.
+	;-- Adds a line break to separate the Nextor >= 3.0 info from the Flashjacks info.
 	ld	de,CRLF_S
 	call	PRINT
 
-	;--- Begin writing the driver information on screen.
+	;--- Begin writing the driver text on screen.	
 	ld	de,INFO_S
 	call	PRINT
 	
-	;--- Display the computer model on screen.
-	ld	de,MODELO ;Write Model:
+	;--- Print the computer model on screen.	
+	ld	de,MODELO ; Print "Model:"
 	call	PRINT
-	ld      a,(MSXVER) ;Read the MSX version register from the BIOS
-	cp	00h ;If it is an MSX1, jump to the MSX1 output.
+	ld      a,(MSXVER) ; Fetch the MSX version register from the BIOS
+	cp	00h ; If it is an MSX1, jump to print MSX1.
 	jp	z,IMP_MSX1 
-	cp	01h ;If it is an MSX2, jump to the MSX2 output.
+	cp	01h ; If it is an MSX2, jump to print MSX2.
 	jp	z,IMP_MSX2 
-	cp	02h ;If it is an MSX2+, jump to the MSX2+ output.
+	cp	02h ; If it is an MSX2+, jump to print MSX2+.
 	jp	z,IMP_MSX2M 
-	cp	03h ;If it is an MSX TurboR, jump to the MSX TurboR output.
+	cp	03h ; If it is an MSX TurboR, jump to print MSX TurboR.
 	jp	z,IMP_MSXR 
-	cp	04h ;If it is an OCM, jump to the OCM output.
+	cp	04h ; If it is an OCM, jump to print OCM.
 	jp	z,IMP_OCM 
-	jp	NO_DETEC ;If none of the mentioned versions, print not detected.
+	jp	NO_DETEC ; If it is none of the versions above, print "not detected".
 IMP_MSX1:
 	ld	de,M_MSX1
 	call	PRINT
@@ -1132,25 +1125,26 @@ NO_DETEC:
 	ld	de,M_NDTC
 	call	PRINT
 FIN_IMP:
-	pop	hl ;Restore the startup variables.
+	pop	hl ; Restore the startup variables.
 	pop	bc 
 	pop	af
 
-	;-- Search for the drive on screen.
+	;-- Print the search for the drive on screen.
 	ld	de,SEARCH_S
 	call	PRINT
 
 	ld	a,1
 	call	MY_GWORK
-	call	IDE_ON
 	ld	(ix),0			;Assume both devices empty
 	ld	(ix+4),0	
 
+        call    IDE_ON
         ld      a,M_SRST		;Do a software reset
         ld      (IDE_DEVCTRL),a
         nop     ;Wait 5 us
         xor     a
         ld      (IDE_DEVCTRL),a
+        call    IDE_OFF
 
 WAIT_RESET:
         ld      de,7640			;Timeout after 30 s
@@ -1165,9 +1159,11 @@ WAIT_DOT:
 	jp	c,INIT_NO_DEV
         ld      b,255
 WAIT_RESET2:
+        call    IDE_ON
         ld      a,(IDE_STATUS)
         and     M_BSY+M_DRDY
         cp      M_DRDY
+        call    IDE_OFF
         jp      z,WAIT_RESET_END        ;Wait for BSY to clear and DRDY to set          
         djnz    WAIT_RESET2
         dec     de
@@ -1182,13 +1178,17 @@ WAIT_RESET_END:
 MASTER_CHECK1_END:
         ld      a,46			;Print dot
         call    DRIVER_CHPUT
-       
+
+        ; The reset wait has left IDE disabled. Re-enable it only for
+        ; the short hardware reset sequence, then release it again.
+        call    IDE_ON
         ld      a,M_SRST		; Do ANOTHER software reset
         ld      (IDE_DEVCTRL),a
         nop     			;Wait 5 us
         xor     a
         ld      (IDE_DEVCTRL),a
 	nop				;Wait 5 us
+        call    IDE_OFF
         ld      a,46			;Print dot
         call    DRIVER_CHPUT
 
@@ -1204,7 +1204,7 @@ WSKIPMAS:			; If ESC is pressed, ignore this device
         ld      de,624			; Wait 1s to read the keyboard
 WSKIPMAS1:
         call    CHECK_ESC
-        jp      c,NODEV_MASTER
+        jp      c,NODEV_MASTER_NOIDE
         ld      b,64
 WSKIPMAS2:
 	ex	(sp),hl
@@ -1217,7 +1217,8 @@ WSKIPMAS2:
 
 	ld	a,(ix)			;If the device isn't flagged it doesn't exists
 	cp	1
-	jp	nz,NODEV_MASTER
+	jp	nz,NODEV_MASTER_NOIDE
+        call    IDE_ON
         ld      a,46			;Print FIRST dot
         call    DRIVER_CHPUT
 
@@ -1239,25 +1240,25 @@ WSKIPMAS2:
         ld      a,46			;Print FOURTH dot
         call    DRIVER_CHPUT
 
-	;Test IDIOMA, RAM1 and RAM2 commands. This must be entered with its IDE_ON call and its IDE_OFF at the end. <-- Delete this piece of program once tested.
-	;ld	a,(IDE_IDIOMA) ;Read the language variable 0 to 255 (0 Spanish, 1 English)
+	; Test IDIOMA, RAM1 and RAM2 commands. This must be entered with its call IDE_ON and its IDE_OFF at the end. <-- Delete this piece of code once tested.
+	;ld	a,(IDE_IDIOMA) ; Read the language variable 0 to 255 (0 Spanish, 1 English)
 	;add	a, 30h
 	;call	DRIVER_CHPUT
 
-	;ld	a,6 ;Put a 6
-	;ld	(IDE_RAM1), a ;Transfer it to an FPGA RAM byte (RAM1)
-	;xor	a ;Clear accumulator
-	;ld	a,(IDE_RAM1) ;Retrieve an FPGA RAM byte (RAM1)
+	;ld	a,6 ; Set to 6
+	;ld	(IDE_RAM1), a ; Transfer it to an FPGA RAM byte (RAM1)
+	;xor	a ; Clear accumulator
+	;ld	a,(IDE_RAM1) ; Retrieve an FPGA RAM byte (RAM1)
 	;add	a, 30h
 	;call	DRIVER_CHPUT
 
 	;ld	a,9
-	;ld	(IDE_RAM2), a ;Transfer it to an FPGA RAM byte (RAM1)
-	;xor	a ;Clear accumulator
-	;ld	a,(IDE_RAM2) ;Retrieve an FPGA RAM byte (RAM1)
+	;ld	(IDE_RAM2), a ; Transfer it to an FPGA RAM byte (RAM1)
+	;xor	a ; Clear accumulator
+	;ld	a,(IDE_RAM2) ; Retrieve an FPGA RAM byte (RAM1)
 	;add	a, 30h
 	;call	DRIVER_CHPUT
-	;End of IDIOMA, RAM1 and RAM2 command test.
+	; End of IDIOMA, RAM1 and RAM2 command test.
 
 	call	WAIT_CMD_RDY		;Try to select the device
 	jp	c,NODEV_MASTER		;this is our last chance to *NOT* detect it
@@ -1272,22 +1273,35 @@ WSKIPMAS2:
 	jp	OK_MASTER
 
 NODEV_MASTER:
+        ; From here on the IDE hardware is no longer needed. Release it
+        ; before waiting for ESC, otherwise IDE_OFF would leave interrupts
+        ; disabled for an indeterminate time.
+        call    IDE_OFF
+NODEV_MASTER_WAIT:
 	call	CHECK_ESC
-	jp	c,NODEV_MASTER
+	jp	c,NODEV_MASTER_NOIDE
+	jp	NODEV_MASTER_WAIT
 
-	ld	(ix),0	
+NODEV_MASTER_NOIDE:
+	ld	(ix),0
 	ld	de,NODEVS_S
 	call	PRINT
-	
+
+FINAL_RESET:
+        call    IDE_ON
+        jp      FINAL_RESET_ACTIVE
+
 OK_MASTER:
+FINAL_RESET_ACTIVE:
         ld      a,M_SRST		;Last software reset before we go
         ld      (IDE_DEVCTRL),a		;some times a faulty slave leaves
 					;BSY set forever (30s)
         nop     ;Wait 5 us
         xor     a
         ld      (IDE_DEVCTRL),a
+        call    IDE_OFF
 
-	jp	DRV_INIT_END
+	jp	DRV_INIT_END_NOIDE
 
 INIT_NO_DEV:
 	call	CHECK_ESC
@@ -1300,105 +1314,102 @@ INIT_NO_DEV:
 	ld	de,NODEVS_S
 	call	PRINT
 		
-	;--- End of initialization procedure.
+	;--- End of the initialization procedure.
 
-DRV_INIT_END:
-	ld	(ix+4),0 ;Mark that there is no slave device.
-	call	IDE_OFF
+DRV_INIT_END_NOIDE:
+	ld	(ix+4),0 ; Flag that there is no slave device.
 
-	;--- 2-second waiting delay so the driver loading text can be seen on screen.
-	;--- If it is an MSXTurboR, do not do it. It already has a startup delay.
+	;--- Wait delay of 2 seconds so the driver loading text can be seen on screen. 
+	;--- Not done on an MSXTurboR, since that machine already has its own delay at boot.
 	push	de
 	push	bc
-	ld      a,(MSXVER) ;Read the MSX version register from the BIOS
-	cp	03h ;If it is an MSX TurboR, jump because this machine is slow enough during startup.
-	jp	z,ESPERA_FIN ;Skip the 2s wait for TurboR
-	ld	de,1861	;Counter loaded for 2s
+	ld      a,(MSXVER) ; Fetch the MSX version register from the BIOS
+	cp	03h ; If it is an MSX TurboR, jump ahead since this machine is already slow to boot.
+	jp	z,ESPERA_FIN ; Skip the 2s wait for the TurboR
+	ld	de,1861	; Counter loaded for 2s
 ESPERA_RDY1:
 	ld	b,255
 ESPERA_RDY2:
-	djnz	ESPERA_RDY2	;Bucle ESPERA_RDY2
+	djnz	ESPERA_RDY2	; ESPERA_RDY2 loop
 	dec	de
 	ld	a,d
 	or	e
-	jp	nz,ESPERA_RDY1	;Bucle ESPERA_RDY1 
+	jp	nz,ESPERA_RDY1	; ESPERA_RDY1 loop
 ESPERA_FIN:
 	pop	bc
 	pop	de
 
-	;--- FLASHJACKS device assistance code. Executed after NEXTOR startup.
+	;--- Support code for the FLASHJACKS drive. Runs after NEXTOR startup.
 	call	IDE_ON
-	ld      a,(MSXVER) ;Read the MSX version register from the BIOS
-	cp	00h ;If it is an MSX1, skip the VDP forcing operation due to its incompatibility.
+	ld      a,(MSXVER) ; Fetch the MSX version register from the BIOS
+	cp	00h ; If it is an MSX1, skip the VDP forcing operation due to incompatibility.
 	jp	z,DEV_FLASH_FIN 
 	
-	;Check pressed key
+	; Compare pressed key
 	ld	b,7 ;row 7 	RET 	SELECT 	BS 	STOP 	TAB 	ESC 	F5 	F4
 	in	a,(0AAh)
 	and	11110000b
 	or	b
 	out	(0AAh),a
-	;Read from standard port A9h
-	in      a, (0A9h)       ;First read (standard port)
-	ld      c, a            ; Guardar en C
-	;Read from alternative port DEh
-	in      a, (0DEh)       ;Second read (alternative port)
-	;Combine both reads with AND
+	; Read from standard port A9h
+	in      a, (0A9h)       ; First read (standard port)
+	ld      c, a            ; Store in C
+	; Read from alternate port DEh
+	in      a, (0DEh)       ; Second read (alternate port)
+	; Combine both reads with AND
 	and     c               ; A = A9h AND DEh	
-	bit	1,a ;F5 -- If the key is pressed, VDP goes to the frequency switching routine.
-	jp	z,DEV_VDP_FIN ;Skip VDP handling for VDP frequency switching by pressed key.
-	ld      a,(IDE_FLASHJACKS) ;Read the FlashJacks register.
-	and	00000011b ;Pass through the forced-frequency bits.
-	cp	003h ;Forced to 60Hz. Force bit = 1 + 60 Hz bit = 1
-	jp	z,DEV_FLASH60 ;Jump to 60 Hz forcing.
-	cp	002h ;Forced to 50Hz. Force bit = 1 + 50 Hz bit = 0
-	jp	z,DEV_FLASH50 ;Jump to 50 Hz forcing.
-	jp	DEV_FLASH_FIN ;Other options are ignored and no change is made.
+	bit	1,a ;F5 -- If the VDP key is pressed, jumps to the frequency-switching routine.
+	jp	z,DEV_VDP_FIN ; Skips VDP handling for the pressed-key VDP switch.
+	ld      a,(IDE_FLASHJACKS) ; Fetch the Flashjacks register. 
+	and	00000011b ; Keep only the frequency-force bits.
+	cp	003h ;	Forced to 60Hz. Force bit set to 1 + 60 Hz bit set to 1
+	jp	z,DEV_FLASH60 ; Jump to force 60 Hz.
+	cp	002h ;	Forced to 50Hz. Force bit set to 1 + 50 Hz bit set to 0
+	jp	z,DEV_FLASH50 ; Jump to force 50 Hz.
+	jp	DEV_FLASH_FIN ; Other options are ignored and no change is made.
 
 DEV_FLASH50:
-	ld	a,02h ;02h = 50Hz and 00h = 60Hz
+	ld	a,02h ; 02h for 50hz and 00h for 60hz
 	jp	DEV_FLASHVDP;
 
 DEV_FLASH60:
-	ld	a,00h ;02h = 50Hz and 00h = 60Hz
+	ld	a,00h ; 02h for 50hz and 00h for 60hz
 
 DEV_FLASHVDP:
 	out	(099h),a ;Direct VDP output
-	ld	(0ffe8h), a ;Output through BIOS to VDP register 9
+	ld	(0ffe8h), a ;VDP register 9 output via BIOS
 	ld	a,89h
 	out	(099h),a
 
 DEV_FLASH_FIN:
 	call	IDE_OFF
-	jp	NO_FIRM_BOOT ;Jump to the firmware boot-jump check for some MSX models.
+	jp	NO_FIRM_BOOT ; Jump to check the firmware boot skip for some MSX models.
 
 DEV_VDP_FIN:
-	;Execute the existing VDP frequency switch
+	; Toggle the existing VDP setting
 	ld	hl,0ffe8h;VDP register value
 	ld	a,(hl)
 	xor	2
 	ld	(hl),a
-	di
 	out	(99h),a ;Set VDP Frequency
 	ld	a,9+128
-	ei
 	out	(099h),a
 	call	IDE_OFF
-	jp	NO_FIRM_BOOT ;Jump to the firmware boot-jump check for some MSX models.
+	jp	NO_FIRM_BOOT ; Jump to check the firmware boot skip for some MSX models.
 
-NO_FIRM_BOOT:;Firmware boot-jump check.
+NO_FIRM_BOOT:; Check for the firmware boot skip on some MSX models.
 	
 	call	IDE_ON
-	ld      a,(IDE_FLASHJACKS) ;Read the FlashJacks register.
-	and	00010000b ;Pass through the MSX firmware boot-jump marker
-	cp	010h ;Check MSX firmware boot-jump bit.
-	jp	nz,NULL_OTHER_SLOT ;No valid marker was detected in the FlashJacks register, so no MSX firmware boot jump is performed.
-	call	IDE_OFF
+	ld      a,(IDE_FLASHJACKS) ; Fetch the Flashjacks register. 
+	and	00010000b ; Keep only the MSX firmware boot-skip flag
+	cp	010h ;	Check the MSX firmware boot-skip bit.
+	call	z,IDE_OFF
+	jp	nz,NULL_OTHER_SLOT ; No correct flag was detected in the Flashjacks register, so nothing from the firmware boot skip is executed.
 
-	;---- Disable the internal boot. To continue, set a breakpoint on Hook #FEDA (Memory write watchpoint).
-	;---- Entirely created by Aquijacks (FlashJacks) 16/12/2023.
+	;---- Bypass of the internal boot. To follow along, set a breakpoint on Hook #FEDA. (Memory write watchpoint)
+	;---- Created entirely by Aquijacks (Flashjacks) 16/12/2023.
 
-	;---- Verify through the hook that it is not a Panasonic.
+	;---- Checks via the hook whether this is not a Panasonic.
 	ld	a,(#FEFE)
 	cp	#87
 	jp	nz, No_Panasonic
@@ -1408,106 +1419,105 @@ NO_FIRM_BOOT:;Firmware boot-jump check.
 	ld	(#CBD8),a	; Bypass FS-A1 firmware
 	ld	(#C3CE),a	; Bypass FS-A1F firmware
 	ld	(#C3D2),a	; Bypass FS-A1mk2 firmware
-	jp	NULL_OTHER_SLOT ;End of the story. Nothing else is needed.
+	jp	NULL_OTHER_SLOT ; End of the story. Nothing more is needed.
 	 
 No_Panasonic:
-	;Verify that it is not a Sony HB-55/75P, continuing with the remaining models.
+	;Check that this is not a Sony HB-55/75p, then continue with the rest of the models.
 	ld	a,0		; Slot 0
-	ld	hl,#8010	;Read the menu ROM.
+	ld	hl,#8010	; Read the menu ROM.
 	call	RDSLT
-	ei			;RDSLT has a DI but no EI. We add it.
-	cp	#F3		; dato a comparar
+	ei			; RDSLT does a DI but not an EI. We add it here.
+	cp	#F3		; value to compare
 	jp	nz, No_HB_75
 	ld	a,0		; Slot 0
-	ld	hl,#8011	;Read the menu ROM.
+	ld	hl,#8011	; Read the menu ROM.
 	call	RDSLT
-	ei			;RDSLT has a DI but no EI. We add it.
-	cp	#3E		; dato a comparar
+	ei			; RDSLT does a DI but not an EI. We add it here.
+	cp	#3E		; value to compare
 	jp	nz, No_HB_75	
-	jp	NULL_OTHER_SLOT	;Return control if it is an unpatched HB-75P, since these models detect disk and disable the menu.
+	jp	NULL_OTHER_SLOT	; Return control if this is an unpatched HB-75p, since these models detect the disk and disable the menu.
 
 No_HB_75:
-	;Routine that bypasses the ROM on HB-F9P/S, HB-F1, HB-101/201P, Mitsubishi G1 Series, Toshiba Series H, National FS-4000/4500 and other models with the same system.
-	;Patch the instruction at address F38Fh from call #F398 to call #F460 (free memory)
+	; Routine that performs the ROM bypass for the HB-F9P/S, HB-F1, HB-101/201P, Mitsubishi G1 Series, Toshiba Series H, National FS-4000/4500 models and others using the same system.  
+	; Patches the instruction at address F38Fh, call #F398, to call #F460 (free memory)
 	ld	a,060h
 	ld	(#F390),a
 	ld	a,0F4h
 	ld	(#F391),a
 
-	;At memory #F460 add the "Adding" patch code to be executed.
+	; At memory address #F460, add the "Adding" patch code to be executed.
 	ld	hl,Adding
 	ld	de,#F460
-	ld	bc,7Fh ;Number of bytes to copy. It is not exact but more than enough for the code to be inserted.
+	ld	bc,7Fh ; Number of bytes to copy. Not exact, but more than enough for the code being inserted.
 	ldir
-	;This is a counter we create to abort after x patch-search attempts. If it calls address 00XX through the F390 jump, it aborts and restores its initial state.
-	ld	a, 30h    ;Number of attempts in hexadecimal.
-	ld	(#F4E0),a ;Any free memory address.
+	; This is a counter we created to abort after x attempts of looking for the patch point. If a call to address 00XXh is made via the F390 jump, it aborts and restores its initial state.
+	ld	a, 30h    ; Number of attempts, in hexadecimal.
+	ld	(#F4E0),a ; Any free memory address.
 
-	jp	NULL_OTHER_SLOT	 ;Return control. The RAM will now be patched with the small program. Now wait for the CPU to reach this location.
+	jp	NULL_OTHER_SLOT	 ; Return control. RAM is now patched with the little program. Now we just wait for the CPU to land here.
 
 Adding:
-	;Only access to the firmware menu performs the patch. On all other accesses to addresses F390, it jumps to IX as if nothing happened.
-	;IX contains the jump address. This routine is not only used for jumping to the firmware menu, so we will act only on that jump. We remain invisible for the rest.
-	push	af ;Save accumulator and flags because some MSX models are sensitive here to keeping the accumulator and flags unchanged.
+	; The patch only triggers on access to the firmware menu. On all other accesses to the F390 addresses, it jumps to ix as if nothing happened.
+	; ix holds the jump address. That routine isn't only used to jump to the firmware menu, so we only act on the jump to it. For everything else, we stay invisible.
+	push	af ; Save the accumulator and flags, since some MSX models are sensitive in this part of the code about preserving the accumulator and flags.
 	ld	a,ixh
 	cp	#00
-	jr	z, Adding3 ;If it points to 00xxh memory, decrement the failed-attempt counter and, if it is the last one, unpatch and finish.
+	jr	z, Adding3 ;If it points to memory 00xxh, decrement the failed-attempts counter, and if it's the last one, unpatch and finish.
 	ld	a,ixh
 	cp	#40
-	jr	nz, Adding2 ;If it does not point to 40xxh memory, jump.
+	jr	nz, Adding2 ;If it does not point to memory 40xxh, jump.
 	ld	a,ixl
-	cp	#49 ;4049h start address of HB-F1
+	cp	#49 ; 4049h start address of the HB-F1
 	jr	z, Adding4
-	cp	#10 ;4010h start address of HB-F9S / Mitsubishi G1 / Toshiba Series H
+	cp	#10 ; 4010h start address of the HB-F9s / Mitsubishi G1 / Toshiba Series H
 	jr	z, Adding4
-	cp	#43 ;4043h start address of HB-201
+	cp	#43 ; 4043h start address of the HB-201
 	jr	z, Adding4
-	cp	#4C ;404Ch start address of HB-F1II
+	cp	#4C ; 404Ch start address of the HB-F1II
 	jr	z, Adding4
-	cp	#3B ;403Bh start address of National FS-4500
+	cp	#3B ; 403Bh start address of the National FS-4500
 	jr	z, Adding4
-	cp	#1B ;401Bh start address of National FS-4000
+	cp	#1B ; 401Bh start address of the National FS-4000
 	jr	z, Adding4
 Adding2:
-	pop	af   ;Restore AF, restoring initial values for the rest of the MSX operations.
-	jp	(ix) ;Jump as if nothing had happened, waiting for the next attempt.
+	pop	af   ; Restore af to its initial values for the rest of the MSX's operations.
+	jp	(ix) ; Jump as if nothing had happened, waiting for the next attempt.
 Adding3:
-	;Countdown process and abort after x attempts to remove the patch because no suitable MSX model was found to patch.
-	ld	a,(#F4E0) ;Restore counter.
-	dec	a	  ;Subtract 1 from the counter.
-	ld	(#F4E0),a ;Store counter.
-	jr	nz, Adding2 ;If it is not zero, perform another complete cycle.
+	; Decreasing countdown process, aborting after x attempts to remove the patch when no satisfactory MSX model is found to patch.
+	ld	a,(#F4E0) ; Retrieve the counter.
+	dec	a	  ; Subtract 1 from the counter.
+	ld	(#F4E0),a ; Store the counter.
+	jr	nz, Adding2 ; If it's not zero, do another full cycle.
 	
-	;Apply another patch at address F38F so it is restored to the original call #F398. Nothing happened here. ;-)
+	; Apply another patch at address F38F so it goes back to being call #F398, as it was initially. Nothing happened here. ;-)
 	ld	a,098h
 	ld	(#F390),a
 	ld	a,0F3h
 	ld	(#F391),a
-	pop	af   ;Restore AF, restoring initial values for the rest of the MSX operations.
-	jp	(ix) ;Jump as if nothing had happened because Philips and similar models should not be patched.
+	pop	af   ; Restore af to its initial values for the rest of the MSX's operations.
+	jp	(ix) ; Jump as if nothing had happened, since Philips and similar models are not to be patched.
 Adding4:
-	;Apply another patch at address F38F so it is restored to the original call #F398. Nothing happened here. ;-)
+	; Apply another patch at address F38F so it goes back to being call #F398, as it was initially. Nothing happened here. ;-)
 	ld	a,098h
 	ld	(#F390),a
 	ld	a,0F3h
 	ld	(#F391),a
-	pop	af ;Restore AF, restoring initial values for the rest of the MSX operations.
-	ret	;Perform the desired RET, leaving everything intact. (It is the RET that returns from the load without executing the internal ROM)
-	ret	;With the RET performed, patch the code back to its original state, leaving the code intact and exiting cleanly.
+	pop	af ; Restore af to its initial values for the rest of the MSX's operations.
+	ret	; Perform the long-awaited ret, leaving everything intact. (This is the ret that returns the load without running the internal ROM)	
+	ret	; With the ret done, it's patched back to its original state, leaving the code intact and exiting cleanly.
 	ret
 
-	;---- End of internal Boot cancellation. Entirely created by Aquijacks (FlashJacks)
+	;---- End of the internal boot bypass. Created entirely by Aquijacks (Flashjacks)
 
-NULL_OTHER_SLOT:;Check whether to prevent execution of another cartridge in slot 2 or higher.
+NULL_OTHER_SLOT:; Check to cancel execution of another cartridge in slot 2 or higher.
 	
 	call	IDE_ON
-	ld      a,(IDE_FLASHJACKS) ;Read the FlashJacks register.
-	and	00001000b ;Pass through the slot 2 cancellation marker.
-	cp	008h ;Check slot 2 cancellation bit
-	jp	nz,NULL_OTHER_SLOT_EXIT ;No valid marker was detected in the FlashJacks register, so nothing is done for the reset.
-	call	IDE_OFF
-	
-	;Execute cancellation of execution in slots 2 and higher.
+	ld      a,(IDE_FLASHJACKS) ; Fetch the Flashjacks register. 
+	and	00001000b ; Keep only the slot-2 cancellation flag.
+	cp	008h ;	Check the slot-2 cancellation bit
+	jp	nz,NULL_OTHER_SLOT_EXIT ; No correct flag was detected in the Flashjacks register, so nothing from the reset is executed.
+
+	; Cancel execution in slots 2 and above.
 	ld a,#40
         cp h
         jp z, NULL_OTHER_SLOT_EXIT
@@ -1515,23 +1525,23 @@ NULL_OTHER_SLOT:;Check whether to prevent execution of another cartridge in slot
         ld (IX-6),0C3h
         ld (IX-8),0EBh
         ld (IX-12),2
-	jp NULL_OTHER_SLOT_EXIT ;Return control.
+	jp NULL_OTHER_SLOT_EXIT ; Return control.
 
 NULL_OTHER_SLOT_EXIT:
 	call	IDE_OFF
-	ret ;Return control.
+	ret ; Return control.
 
 
 ;--- Subroutines for the INIT procedure
 
-;Check that FLASHJACKS appears at address 457 onward in the SD driver ID.
-;Return zero in A if found, or set the carry flag if not found.
-;Also dump the contents of the SD driver ID into TEMP_WORK, the first 100 bytes.
+; Checks that FLASHJACKS appears at address 457 onward in the SD driver ID.
+; Returns zero in a if found, or sets the carry flag if not found.
+; It also dumps the first 100 bytes of the SD driver ID content into TEMP_WORK. 
 
 INIT_CHECK_DEV:
 	ld	hl,IDE_DATA
 	ld	de,TEMP_WORK
-	ld	bc,50*2	;Get the first 100 values of the SD driver ID
+	ld	bc,50*2	;Take the first 100 values of the SD driver ID
 	ldir
 
 	ld	a,(IDE_STATUS)		;Check status
@@ -1539,26 +1549,26 @@ INIT_CHECK_DEV:
 	jp	z,INIT_CHECK_NODEV
 	
 TEST_FOR_FLASHJACKS:
-	ld	hl,TEMP_WORK+27*2 ;Go to where FLASHJACKS is located
-	ld	b,10 ;Number of comparison bytes.
-	ld	de,DRIVER_N ;Comparison name (FLASHJACKS)
+	ld	hl,TEMP_WORK+27*2 ; Go to where FLASHJACKS should be
+	ld	b,10 ; Number of bytes to compare.
+	ld	de,DRIVER_N ; Name to compare against (FLASHJACKS)
 	
 TESTNAME_LOOP:
-	ld	a,(de)	;Get the location pointed to by the FLASHJACKS constant
-	inc	de	;Increment to the next byte
-	ld	c,a	;Store it in C
-	ld	a,(hl)	;Get the data read from the SD driver ID
-	inc	hl	;Increment to the next byte
+	ld	a,(de)	; Fetch what the FLASHJACKS constant points to
+	inc	de	; Increment to the next byte
+	ld	c,a	; Store it in c
+	ld	a,(hl)	; Fetch the byte read from the SD driver ID
+	inc	hl	; Increment to the next byte
 
-	cp	c	;Compare A with C
-	jp	nz,INIT_CHECK_NODEV	;If not equal, return not found.
-	djnz	TESTNAME_LOOP		;If comparison bytes remain, go to the next one
-	xor	a			;Put zero in A
-	ret				;Return control.
+	cp	c	; Compare a with c
+	jp	nz,INIT_CHECK_NODEV	; If not equal, return "not found".
+	djnz	TESTNAME_LOOP		; If there are bytes left to compare, go to the next one
+	xor	a			; Output a zero in a		
+	ret				; Return control.
 
 INIT_CHECK_NODEV:
-	scf				;Set the carry flag to 1.
-	ret				;Return control.
+	scf				; Set the carry flag to 1.
+	ret				; Return control.
 
 
 ;Print a device name.
@@ -1766,7 +1776,6 @@ DEV_RW_NO0SEC:
 	ld	a,(ix+3)
 	or	M_LBA
 	or	b
-	di ;Disable interrupt requests to avoid interference.
 	ld	(IDE_HEAD),a	;IDE_HEAD must be written first,
 	ld	a,(ix)		;or the other IDE_LBAxxx and IDE_SECCNT
 	ld	(IDE_LBALOW),a	;registers will not get a correct value
@@ -1778,7 +1787,7 @@ DEV_RW_NO0SEC:
 	ld	(IDE_SECCNT),a
 	
 	pop	af
-	jp	c,DEV_DO_WR ;Jump if this is a write request.
+	jp	c,DEV_DO_WR ; Jump if this is a write request.
 
 	;---
 	;---  READ
@@ -1791,7 +1800,7 @@ DEV_RW_NO0SEC:
 	call	DO_IDE
 	pop	bc
 	
-	jp	c,DEV_RW_ERR ;Check whether a failure has occurred.
+	jp	c,DEV_RW_ERR ; Check whether a failure occurred.
 	call	DEV_RW_FAULT
 	ret	nz
 
@@ -1803,20 +1812,20 @@ DEV_R_GDATA:
 	ld	bc,512
 
 BUCLE_R_GDATA:
-	di ;Disable interrupt requests to avoid interference.
+	; Interruptions remain disabled from IDE_ON until IDE_OFF.
 	ld	a,(IDE_STATUS)
 	bit	BSY,a
-	jp	nz,BUCLE_R_GDATA ;Check at the start and proceed when FLASHJACKS reports that it can continue.
-	ldi_512 ;It is an LDIR 21% faster.
+	jp	nz,BUCLE_R_GDATA ; Checks at the start and lets execution continue once FLASHJACKS reports it can proceed.
+	ldi_512 ; This is an ldir, 21% faster.
 
 BUCLE_R_FIN:	
 	ld	a,(IDE_STATUS)
 	bit	BSY,a
-	jp	nz,BUCLE_R_FIN ;Check at the end and proceed when FLASHJACKS reports that FLASHJACKS can continue.
+	jp	nz,BUCLE_R_FIN ; Checks at the end and lets execution continue once FLASHJACKS reports it can proceed.
 	pop	bc
 
 	call	WAIT_IDE
-	jp	c,DEV_RW_ERR ;Check whether a failure has occurred.
+	jp	c,DEV_RW_ERR ; Check whether a failure occurred.
 	call	DEV_RW_FAULT
 	ret	nz
 
@@ -1837,18 +1846,18 @@ DEV_DO_WR:
 	push	bc	;Save sector count
 	call	DO_IDE
 	pop	bc
-	jp	c,DEV_RW_ERR ;Check whether a failure has occurred.
+	jp	c,DEV_RW_ERR ; Check whether a failure occurred.
 
 	ld	b,c	;Retrieve sector count
 DEV_W_LOOP:
 	push	bc
 	ld	de,IDE_DATA
 	ld	bc,512
-	ldi_512 ;It is an LDIR 21% faster.
+	ldi_512 ; This is an ldir, 21% faster.
 	pop	bc
 
 	call	WAIT_IDE
-	jp	c,DEV_RW_ERR ;Check whether the ERR bit is set in status.
+	jp	c,DEV_RW_ERR ; Check whether the ERR status bit is set.
 	call	DEV_RW_FAULT
 	ret	nz
 	
@@ -1911,14 +1920,12 @@ DEV_RW_FAULT:
 	;--- Termination points
 
 DEV_RW_NOSEC:
-	call	IDE_OFF
 	pop	af
 	ld	a,RNF
 	ld	b,0
 	ret
 
 DEV_RW_NODEV:
-	call	IDE_OFF
 	pop	af
 	ld	a,IDEVL
 	ld	b,0
@@ -1962,9 +1969,9 @@ DEV_RW_NODEV:
 
 DEV_INFO:
 	or	a	;Check device index
-	jp	z,DEV_INFO_ERR1
+	jp	z,DEV_INFO_BAD1
 	cp	3
-	jp	nc,DEV_INFO_ERR1
+	jp	nc,DEV_INFO_BAD1
 
 	call	MY_GWORK
 
@@ -1977,7 +1984,7 @@ DEV_INFO:
 
 	ld	a,(ix)
 	or	a	;Device available?
-	jp	z,DEV_INFO_ERR1
+	jp	z,DEV_INFO_BAD1
 
 	ld	(hl),1	;One single LUN
 	inc	hl
@@ -2072,6 +2079,10 @@ DEV_INFO_ERR1:
 	ld	a,1
 	ret
 
+DEV_INFO_BAD1:
+	ld	a,1
+	ret
+
 DEV_INFO_ERR2:
 	call	IDE_OFF
 	ld	a,2
@@ -2140,25 +2151,24 @@ DEV_STRING_SKIP:
 DEV_STATUS:
 	set	0,b	;So that CHECK_DEV_LUN admits B=0
 
-	call	CHECK_DEV_LUN ;Check the logical unit.
+	call	CHECK_DEV_LUN ; Check the logical unit.
 	ld	e,a
 	ld	a,0
 	ret	c
 
-	di;
-	call	IDE_ON	      ;Enable the IDE options
-	ld	a,(IDE_ERROR) ;Request the error codes.
+	call	IDE_ON	      ; Enable the IDE registers
+	ld	a,(IDE_ERROR) ; Request the error codes.
 	ld	b,a
-	call	IDE_OFF	      ;Disable the IDE options.
+	call	IDE_OFF	      ; Disable the IDE registers.
 	ld	a,b	
 
-	bit	MC,a	;Check detected SD card change
+	bit	MC,a	;Check whether an SD card change was detected
 	jp	z,DEV_No_Cambio
-	ld	a,2	;Respond with drive changed.
+	ld	a,2	;Report that the unit has changed.
 	ret
 
 DEV_No_Cambio:
-	ld	a,1	;Respond with drive unchanged.
+	ld	a,1	;Report that the unit has not changed.
 	ret
 
 
@@ -2195,7 +2205,7 @@ DEV_No_Cambio:
 
 LUN_INFO:
 	call	CHECK_DEV_LUN
-	jp	c,LUN_INFO_ERROR
+	jp	c,LUN_INFO_BAD
 
 	ld	b,a
 	call	IDE_ON
@@ -2274,7 +2284,7 @@ LUN_INFO_SSIZE:
 	;Set other parameters
 
 	ld	(ix),0	  ;Block device
-	ld	(ix+7), 1 ;bit 0 = 1: It is a hot-plug removable medium (see +7 and its flags in the LUN_INFO description)
+	ld	(ix+7), 1 ;bit 0 set to 1: it is a hot-plug removable medium (see +7 and its flags in the LUN_INFO description)
 
 	call	IDE_OFF
 	xor	a
@@ -2282,6 +2292,10 @@ LUN_INFO_SSIZE:
 
 LUN_INFO_ERROR:
 	call	IDE_OFF
+	ld	a,1
+	ret
+
+LUN_INFO_BAD:
 	ld	a,1
 	ret
 
@@ -2370,13 +2384,19 @@ DEV_CMD:
 ;Note that bank 7 (the driver code bank) must be kept switched
 
 IDE_ON:
+	; Entering this routine starts the FlashJacks critical section.
+	; Interrupts are disabled before the IDE mapping is changed.
+	di
 	ld	a,1+7*32
 	ld	(IDE_BANK),a
 	ret
 
 IDE_OFF:
+	; Every successful IDE_ON must finish through IDE_OFF.
+	; Restore the normal ROM mapping and re-enable interrupts.
 	ld	a,7*32
 	ld	(IDE_BANK),a
+	ei
 	ret
 
 ;-----------------------------------------------------------------------------
@@ -2417,22 +2437,62 @@ WAIT_RDY_END:
 ;
 ; Input:  A = Command code
 ;         Other command registers appropriately set
-; Output: Cy=1 if ERR bit in status register set
+; Output: Cy=1 if ERR bit in status register set, or on timeout
 
-DO_IDE: di
-	ld	(IDE_CMD),a ;Send a command.
+DO_IDE:
+	ld	(IDE_CMD),a ; Send a command.
+	; Falls through into WAIT_IDE to wait for DRQ/end of command.
+
+;-----------------------------------------------------------------------------
+;
+; Wait for DRQ to be set, or for BSY to clear, after a command has been
+; issued (via DO_IDE) or after transferring a 512-byte block during a
+; multi-sector READ/WRITE.
+;
+; Previously there was no time limit: if the card got stuck
+; (removed mid-operation, core failure, etc.) the Z80 would
+; wait forever, and with interrupts disabled on top of that.
+; The same ~5s timeout as WAIT_CMD_RDY is added here,
+; returning Cy=1 (treated as an error) if it runs out.
+;
+; Input:  Nothing
+; Output: Cy=1 if ERR bit in status register set, or on timeout
+; Preserves: HL, DE, BC
 
 WAIT_IDE:
+	push	hl
+	push	de
+	push	bc
+	ld	de,1357		;Limit the wait to 5s, same as WAIT_CMD_RDY
+WAIT_IDE1:
+	ld	b,255
+WAIT_IDE2:
 	nop	; Wait 50us
 	nop	; Wait 50us
 	ld	a,(IDE_STATUS)
 	bit	DRQ,a
-	jp	nz,IDE_END
+	jp	nz,WAIT_IDE_END
 	bit	BSY,a
-	jp	nz,WAIT_IDE
+	jp	z,WAIT_IDE_END
+	djnz	WAIT_IDE2	;End of WAIT_IDE2 loop
+	dec	de
+	ld	a,d
+	or	e
+	jp	nz,WAIT_IDE1	;End of WAIT_IDE1 loop
 
-IDE_END:
-	rrca	;If status bit 0 is 1, send it to Cy, which is error 0, IDE_Status ERR bit
+	;--- Timeout: no response within ~5s. Treated as an error
+	;    (Cy=1), the same as if the ERR bit were set.
+	pop	bc
+	pop	de
+	pop	hl
+	scf
+	ret
+
+WAIT_IDE_END:
+	pop	bc
+	pop	de
+	pop	hl
+	rrca	; If bit 0 of status is 1, sends it to Cy, which is error bit 0 (ERR) of IDE_Status
 	ret
 
 ;-----------------------------------------------------------------------------
@@ -2446,12 +2506,12 @@ CHECK_ESC:
 	and	11110000b
 	or	b
 	out	(0AAh),a
-	;Read from standard port A9h
-	in      a, (0A9h)       ;First read (standard port)
-	ld      c, a            ; Guardar en C
-	;Read from alternative port DEh
-	in      a, (0DEh)       ;Second read (alternative port)
-	;Combine both reads with AND
+	; Read from standard port A9h
+	in      a, (0A9h)       ; First read (standard port)
+	ld      c, a            ; Store in C
+	; Read from alternate port DEh
+	in      a, (0DEh)       ; Second read (alternate port)
+	; Combine both reads with AND
 	and     c               ; A = A9h AND DEh	
 	bit	2,a
 	jp	nz,CHECK_ESC_END
@@ -2620,7 +2680,7 @@ INFO_S:
 SEARCH_S:
 	db	"Buscando: ",0
 DRIVER_N:
-	db	"LFSAJHCASK",0 ;Compare this name at startup. Odd bytes by pairs.
+	db	"LFSAJHCASK",0 ; Compares this name at boot. Odd bytes paired with even ones.
 NODEVS_S:
 	db	"No encontrada",13,10,0
 MASTER_S:
